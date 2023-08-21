@@ -1,0 +1,13 @@
+# ninja log v5
+4	14935	0	operator.o	5be00a63f69632c4
+4	78624	0	assign_score_withk_gpu.cuda.o	430f9d0673f7e126
+4	82014	0	assign_score_withk_halfkernel_gpu.cuda.o	2bb52df82a952670
+82015	82593	0	gpconv_cuda.so	6f2ece7ba8e123c6
+4	10931	0	operator.o	826e64a9d4bb0ff8
+5	51896	0	assign_score_withk_gpu.cuda.o	b1e9c34b53128ac5
+5	51993	0	assign_score_withk_halfkernel_gpu.cuda.o	4eed1e269769d13e
+51993	52480	0	gpconv_cuda.so	6f2ece7ba8e123c6
+1	30085	0	operator.o	76ef1aca0198c26a
+3	59396	0	assign_score_withk_halfkernel_gpu.cuda.o	50c7dfc83faddd9
+2	60422	0	assign_score_withk_gpu.cuda.o	a47d94f1cbeb691d
+60422	61048	0	gpconv_cuda.so	d6c08856eb0ffca8
