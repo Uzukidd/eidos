@@ -1321,6 +1321,7 @@ class PointCloudAttack(object):
                     query_costs += 1
                 loss = self.CWLoss(logits, target, kappa=-999., tar=True, num_classes=self.num_class)
                 if loss.item() > best_loss:
+                    alpha_hat = bp.gradient_map_project(new_points, spin_axis_matrix, translation_matrix, ori_points, normal_vec, directions)
                     pert[:,idx,:] -= 0.16 * alpha_hat[:,idx,:]
                     best_loss = loss.item()
                     new_points = new_points + pert

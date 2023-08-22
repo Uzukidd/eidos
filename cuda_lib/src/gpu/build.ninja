@@ -19,9 +19,9 @@ rule cuda_compile
 rule link
   command = $cxx $in $ldflags -o $out
 
-build operator.o: compile /home/zhanglj2022/chengl/Modified_data/Eidos_published/cuda_lib/src/gpu/operator.cpp
-build assign_score_withk_gpu.cuda.o: cuda_compile /home/zhanglj2022/chengl/Modified_data/Eidos_published/cuda_lib/src/gpu/assign_score_withk_gpu.cu
-build assign_score_withk_halfkernel_gpu.cuda.o: cuda_compile /home/zhanglj2022/chengl/Modified_data/Eidos_published/cuda_lib/src/gpu/assign_score_withk_halfkernel_gpu.cu
+build operator.o: compile /home/zhanglj2022/chengl/Modified_data/eidos/cuda_lib/src/gpu/operator.cpp
+build assign_score_withk_gpu.cuda.o: cuda_compile /home/zhanglj2022/chengl/Modified_data/eidos/cuda_lib/src/gpu/assign_score_withk_gpu.cu
+build assign_score_withk_halfkernel_gpu.cuda.o: cuda_compile /home/zhanglj2022/chengl/Modified_data/eidos/cuda_lib/src/gpu/assign_score_withk_halfkernel_gpu.cu
 
 build gpconv_cuda.so: link operator.o assign_score_withk_gpu.cuda.o assign_score_withk_halfkernel_gpu.cuda.o
 

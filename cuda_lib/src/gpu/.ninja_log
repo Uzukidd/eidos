@@ -11,3 +11,7 @@
 3	59396	0	assign_score_withk_halfkernel_gpu.cuda.o	50c7dfc83faddd9
 2	60422	0	assign_score_withk_gpu.cuda.o	a47d94f1cbeb691d
 60422	61048	0	gpconv_cuda.so	d6c08856eb0ffca8
+1	12539	0	operator.o	6281aa55270c87b1
+2	34179	0	assign_score_withk_gpu.cuda.o	23343ceb3f883c88
+2	34609	0	assign_score_withk_halfkernel_gpu.cuda.o	c92854e1dbebd35e
+34609	34992	0	gpconv_cuda.so	d6c08856eb0ffca8
