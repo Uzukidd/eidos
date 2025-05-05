@@ -8,7 +8,7 @@ class SiLU(nn.Module):
          return x * torch.sigmoid(x) 
 nn.SiLU = SiLU
 import timm
-from timm.models.layers import DropPath, trunc_normal_
+from timm.layers import DropPath, trunc_normal_
 from .dvae import Group
 from .dvae import DiscreteVAE, Encoder
 

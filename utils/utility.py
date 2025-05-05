@@ -17,9 +17,9 @@ import torchvision.transforms as transforms
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import seaborn
-seaborn.set()
-seaborn.set(rc={'figure.figsize':(11.7000,8.27000)})
+# import seaborn
+# seaborn.set()
+# seaborn.set(rc={'figure.figsize':(11.7000,8.27000)})
 linewidth = 4.0
 fontsize = 15.0 + 11.0
 markersize = 10.0

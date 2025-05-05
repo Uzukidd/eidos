@@ -6,7 +6,6 @@ import os
 import sys
 import time
 
-import ipdb
 import numpy as np
 import open3d as o3d
 from pytorch3d.ops import knn_points, knn_gather

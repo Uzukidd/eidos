@@ -85,6 +85,7 @@ def main():
         
         points, target = data_preprocess(data)
         target = target.long()
+        assert points.device == torch.device("cuda:0")
 
         if args.target_model == "PointNet" or args.target_model == "PointNetPP_ssg":
             for b in range(0, target.size(0)):
@@ -302,7 +303,7 @@ if __name__ == "__main__":
     args.device = torch.device("cuda:%d" % args.device)
 
     # main loop
-    writer = SummaryWriter(log_dir=f'./logs/{args.task_name}')
-    args.writer = writer
+    # writer = SummaryWriter(log_dir=f'./logs/{args.task_name}')
+    # args.writer = writer
     main()
-    writer.close()
+    # writer.close()

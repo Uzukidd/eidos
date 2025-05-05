@@ -8,7 +8,7 @@ from torch.autograd import Variable
 from tqdm import tqdm
 from collections import defaultdict
 import datetime
-import pandas as pd
+# import pandas as pd
 import torch.nn.functional as F
 
 

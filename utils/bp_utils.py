@@ -8,6 +8,19 @@ import torch.nn.functional as F
 
 from utils.loss_utils import norm_l2_loss, chamfer_loss, pseudo_chamfer_loss, hausdorff_loss, curvature_loss, kNN_smoothing_loss, _get_kappa_ori, _get_kappa_adv
 
+import timeit
+
+class CodeTimer:
+    def __init__(self, name=None):
+        self.name = " '"  + name + "'" if name else ''
+
+    def __enter__(self):
+        self.start = timeit.default_timer()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.took = (timeit.default_timer() - self.start) * 1000.0
+        print('Code block' + self.name + ' took: ' + str(self.took) + ' ms')
+
 def get_normal_vector(points):
     """Calculate the normal vector.
 
@@ -17,7 +30,7 @@ def get_normal_vector(points):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points.squeeze(0).detach().cpu().numpy())
     pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=20))
-    normal_vec = torch.FloatTensor(pcd.normals).cuda().unsqueeze(0)
+    normal_vec = torch.from_numpy(np.asarray(pcd.normals)).float().cuda().unsqueeze(0)
     return normal_vec
 
 def proj_surface(x, n):
