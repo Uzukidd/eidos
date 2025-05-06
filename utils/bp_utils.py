@@ -140,7 +140,8 @@ class boundary_projectuion(nn.Module) :
         self.in_out = False
         self.exponential_step = args.exponential_step
 
-    
+    import line_profiler
+    @line_profiler.profile
     def get_loss(self, points, ori_points, normal_vec, loss_type = "l2"):
         if loss_type == "l2":
             loss = norm_l2_loss(points, ori_points)
