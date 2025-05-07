@@ -123,11 +123,18 @@ def main():
 
     query_costs = []
 
+    max_len = len(datas)
     if args.time_verify or args.ss_exp:
-        datas = datas[::10]
+        if args.dataset != "ModelNet40Full":
+            datas = datas[::10]
+            max_len = len(datas)
+        else:
+            max_len = 20
 
-    for batch_id, data in tqdm(enumerate(datas), total=len(datas)):
-
+   
+    for batch_id, data in tqdm(enumerate(datas), total=max_len):
+        if batch_id == max_len:
+            break
         data = list(data)
         data[0] = torch.from_numpy(data[0][np.newaxis, :])
         data[1] = torch.from_numpy(data[1][np.newaxis, :])
@@ -242,7 +249,7 @@ def main():
 
         log = "Result: \n"
         log += f"Recalled samples:{np.array(recall).sum()}\n"
-        log += f"A.S.R:{np.array(asr)[recall].mean()}±{np.array(asr)[recall].std()}\n"
+        log += f"A.S.R:{np.array(asr)[recall].mean()}\n"
         log += f"Average L2:{np.array(l2_loss).mean()}±{np.array(l2_loss).std()}\n"
         log += f"Average HD(double):{np.array(d_hd_loss).mean()}±{np.array(d_hd_loss).std()}\n"
         log += f"Average HD:{np.array(hd_loss).mean()}±{np.array(hd_loss).std()}\n"
@@ -423,7 +430,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ss_exp",
         action="store_true",
-        default=False,
         help="Whether to launch a small scale experiment [default: False]",
     )
     parser.add_argument(

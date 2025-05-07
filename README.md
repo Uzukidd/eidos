@@ -56,3 +56,9 @@ python main.py --transfer_attack_method ifgm_bp_ours_query --task_name adv_resul
 a. following the instruction at [https://github.com/lulutang0608/Point-BERT]() to install CPP extensions
 
 b. download `PointTransformer_ModelNet1024points.pth` from [https://cloud.tsinghua.edu.cn/f/9be5d9dcbaeb48adb360/?dl=1]() and make sure it is in `checkpoint/ModelNet40/PointTransformer_ModelNet1024points.pth`
+
+## Eidos pointllm Attack
+
+```shell
+python main.py --transfer_attack_method ifgm_bp_ours --dataset ModelNet40Full --data-path data/modelnet40_normal_resampled --surrogate_model pointllm_bert --task_name adv_result --exponential_step
+```

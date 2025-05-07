@@ -69,10 +69,49 @@ class PointCloudAttack(object):
         )
 
         self.build_models()
+
         self.defense_method = args.defense_method
-        self.pre_head = None
+        self.pre_head = nn.Identity()
         if not args.defense_method is None:
             self.pre_head = self.get_defense_head(args.defense_method)
+
+        self.build_attack()
+
+    def build_attack(self):
+        if self.attack_method == "ifgm_si_adv":
+            from attacker.siadv_attack import siadv_attack
+
+            self.attacker = siadv_attack(
+                self.eps,
+                self.step_size,
+                self.max_steps,
+                self.classifier,
+                self.pre_head,
+                self.num_class,
+                self.top5_attack,
+            )
+        # elif self.attack_method == "ifgm_bp_ours":
+        #     return self.shape_invariant_ifgm_bp_mod2(points, target)
+        # elif self.attack_method == "ifgm_si_adv_query":
+        #     return self.shape_invariant_query_attack(points, target)
+        # elif self.attack_method == "ifgm_bp_ours_query":
+        #     return self.shape_invariant_ifgm_bp_query_attack(points, target)
+        # elif self.attack_method == "ifgm_si_bp":
+        #     return self.shape_invariant_ifgm_si_bp(points, target)
+        # elif self.attack_method == "ifgm_bp":
+        #     return self.ifgm_bp(points, target)
+        # elif self.attack_method == "geoa3":
+        #     return self.geoa3_attack(points, target)
+        # elif self.attack_method == "gsda":
+        #     return self.gsda_attack(points, target)
+        # elif self.attack_method == "gsda_bp":
+        #     return self.gsda_attack_bp(points, target)
+        # elif self.attack_method == "simba":
+        #     return self.simba_attack(points, target)
+        # elif self.attack_method == "simbapp":
+        #     return self.simbapp_attack(points, target)
+        else:
+            NotImplementedError
 
     def get_delta(self, points, ori_points, normal_vec, reg_type="l2"):
         points = points.detach()
@@ -197,6 +236,7 @@ class PointCloudAttack(object):
                 "model/classifier/pointbert/PointTransformer_8192point_2layer.yaml",
                 None,
             )
+            wb_classifier = self.load_models(wb_classifier, self.args.surrogate_model)
         else:
             # load white-box surrogate models
             MODEL = importlib.import_module(self.args.surrogate_model)
@@ -211,6 +251,7 @@ class PointCloudAttack(object):
                 "model/classifier/pointbert/PointTransformer_8192point_2layer.yaml",
                 None,
             )
+            classifier = self.load_models(classifier, self.args.target_model)
         else:
             # load black-box target models
             MODEL = importlib.import_module(self.args.target_model)
@@ -235,6 +276,7 @@ class PointCloudAttack(object):
     def load_models(self, classifier, model_name):
         """Load white-box surrogate model and black-box target model."""
         model_path = os.path.join("./checkpoint/" + self.args.dataset, model_name)
+        print(model_path)
         if os.path.exists(model_path + ".pth"):
             checkpoint = torch.load(
                 model_path + ".pth", weights_only=False, map_location=self.args.device
@@ -260,6 +302,7 @@ class PointCloudAttack(object):
             else:
                 classifier.load_state_dict(checkpoint)
         except:
+            print("Model loading failed")
             classifier = nn.DataParallel(classifier)
             classifier.load_state_dict(checkpoint)
         return classifier
@@ -361,38 +404,6 @@ class PointCloudAttack(object):
 
         return factor, output_points, output_reg, initial_lr
 
-    def CWLoss(self, logits, target, kappa=0, tar=False, num_classes=40):
-        """Carlini & Wagner attack loss.
-
-        Args:
-            logits (torch.cuda.FloatTensor): the predicted logits, [1, num_classes].
-            target (torch.cuda.LongTensor): the label for points, [1].
-        """
-        target = (
-            torch.ones(logits.size(0)).type(torch.cuda.FloatTensor).mul(target.float())
-        )
-        target_one_hot = Variable(
-            torch.eye(num_classes).type(torch.cuda.FloatTensor)[target.long()].cuda()
-        )
-
-        real = torch.sum(target_one_hot * logits, 1)
-        if not self.top5_attack:
-            # top-1 attack
-            other = torch.max(
-                (1 - target_one_hot) * logits - (target_one_hot * 10000), 1
-            )[0]
-        else:
-            # top-5 attack
-            other = torch.topk(
-                (1 - target_one_hot) * logits - (target_one_hot * 10000), 5
-            )[0][:, 4]
-        kappa = torch.zeros_like(other).fill_(kappa)
-
-        if tar:
-            return torch.sum(torch.max(other - real, kappa))
-        else:
-            return torch.sum(torch.max(real - other, kappa))
-
     def run(self, points, target):
         """Main attack method.
 
@@ -400,30 +411,31 @@ class PointCloudAttack(object):
             points (torch.cuda.FloatTensor): the point cloud with N points, [1, N, 6].
             target (torch.cuda.LongTensor): the label for points, [1].
         """
-        if self.attack_method == "ifgm_si_adv":
-            return self.shape_invariant_ifgm(points, target)
-        elif self.attack_method == "ifgm_bp_ours":
-            return self.shape_invariant_ifgm_bp_mod2(points, target)
-        elif self.attack_method == "ifgm_si_adv_query":
-            return self.shape_invariant_query_attack(points, target)
-        elif self.attack_method == "ifgm_bp_ours_query":
-            return self.shape_invariant_ifgm_bp_query_attack(points, target)
-        elif self.attack_method == "ifgm_si_bp":
-            return self.shape_invariant_ifgm_si_bp(points, target)
-        elif self.attack_method == "ifgm_bp":
-            return self.ifgm_bp(points, target)
-        elif self.attack_method == "geoa3":
-            return self.geoa3_attack(points, target)
-        elif self.attack_method == "gsda":
-            return self.gsda_attack(points, target)
-        elif self.attack_method == "gsda_bp":
-            return self.gsda_attack_bp(points, target)
-        elif self.attack_method == "simba":
-            return self.simba_attack(points, target)
-        elif self.attack_method == "simbapp":
-            return self.simbapp_attack(points, target)
-        else:
-            NotImplementedError
+        return self.attacker(points, target)
+        # if self.attack_method == "ifgm_si_adv":
+        #     return self.shape_invariant_ifgm(points, target)
+        # elif self.attack_method == "ifgm_bp_ours":
+        #     return self.shape_invariant_ifgm_bp_mod2(points, target)
+        # elif self.attack_method == "ifgm_si_adv_query":
+        #     return self.shape_invariant_query_attack(points, target)
+        # elif self.attack_method == "ifgm_bp_ours_query":
+        #     return self.shape_invariant_ifgm_bp_query_attack(points, target)
+        # elif self.attack_method == "ifgm_si_bp":
+        #     return self.shape_invariant_ifgm_si_bp(points, target)
+        # elif self.attack_method == "ifgm_bp":
+        #     return self.ifgm_bp(points, target)
+        # elif self.attack_method == "geoa3":
+        #     return self.geoa3_attack(points, target)
+        # elif self.attack_method == "gsda":
+        #     return self.gsda_attack(points, target)
+        # elif self.attack_method == "gsda_bp":
+        #     return self.gsda_attack_bp(points, target)
+        # elif self.attack_method == "simba":
+        #     return self.simba_attack(points, target)
+        # elif self.attack_method == "simbapp":
+        #     return self.simbapp_attack(points, target)
+        # else:
+        #     NotImplementedError
 
     def get_defense_head(self, method):
         """Set the pre-processing based defense module.
@@ -761,92 +773,6 @@ class PointCloudAttack(object):
         )
 
         return adv_pc, targeted_label, None
-
-    def shape_invariant_ifgm(self, points, target):
-        """Black-box I-FGSM based on shape-invariant sensitivity maps.
-
-        Args:
-            points (torch.cuda.FloatTensor): the point cloud with N points, [1, N, 6].
-            target (torch.cuda.LongTensor): the label for points, [1].
-        """
-        normal_vec = points[:, :, -3:].data  # N, [1, N, 3]
-        normal_vec = normal_vec / torch.sqrt(
-            torch.sum(normal_vec**2, dim=-1, keepdim=True)
-        )  # N, [1, N, 3]
-        points = points[:, :, :3].data  # P, [1, N, 3]
-        ori_points = points.data
-        clip_func = ClipPointsLinf(budget=self.eps)  # * np.sqrt(3*1024))
-
-        for i in range(self.max_steps):
-            # P -> P', detach()
-            new_points, spin_axis_matrix, translation_matrix = (
-                get_transformed_point_cloud(points, normal_vec)
-            )
-            new_points = new_points.detach()
-
-            new_points.requires_grad = True
-            # P' -> P
-            points = get_original_point_cloud(
-                new_points, spin_axis_matrix, translation_matrix
-            )
-            points = points.transpose(1, 2)  # P, [1, 3, N]
-            # get white-box gradients
-            if not self.defense_method is None:
-                logits = self.wb_classifier(self.pre_head(points))
-            else:
-                logits = self.wb_classifier(points)
-            loss = self.CWLoss(
-                logits, target, kappa=0.0, tar=False, num_classes=self.num_class
-            )
-            self.wb_classifier.zero_grad()
-            loss.backward()
-            # print(loss.item(), logits.max(1)[1], target)
-            grad = new_points.grad.data  # g, [1, N, 3]
-            grad[:, :, 2] = 0.0
-
-            # update P', P and N
-            # # Linf
-            # new_points = new_points - self.step_size * torch.sign(grad)
-            # L2
-            norm = torch.sum(grad**2, dim=[1, 2]) ** 0.5
-
-            new_points = new_points - self.step_size * np.sqrt(3 * 1024) * grad / (
-                norm[:, None, None] + 1e-9
-            )
-
-            points = get_original_point_cloud(
-                # P, [1, N, 3]
-                new_points,
-                spin_axis_matrix,
-                translation_matrix,
-            )
-            points = clip_func(points, ori_points)
-
-            normal_vec = get_normal_vector(points)  # N, [1, N, 3]
-
-        with torch.no_grad():
-            adv_points = points.data
-            if not self.defense_method is None:
-                adv_logits = self.classifier(
-                    self.pre_head(points.transpose(1, 2).detach())
-                )
-            else:
-                adv_logits = self.classifier(points.transpose(1, 2).detach())
-            adv_target = adv_logits.data.max(1)[1]
-
-        if self.top5_attack:
-            target_top_5 = adv_logits.topk(5)[1]
-            if target in target_top_5:
-                adv_target = target
-            else:
-                adv_target = -1
-
-        del normal_vec, grad, new_points, spin_axis_matrix, translation_matrix
-        return (
-            adv_points,
-            adv_target,
-            (adv_logits.data.max(1)[1] != target).sum().item(),
-        )
 
     import line_profiler
 
