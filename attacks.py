@@ -90,8 +90,10 @@ class PointCloudAttack(object):
                 self.num_class,
                 self.top5_attack,
             )
-        # elif self.attack_method == "ifgm_bp_ours":
-        #     return self.shape_invariant_ifgm_bp_mod2(points, target)
+        elif self.attack_method == "ifgm_bp_ours":
+            pass
+            # from attacker.eidos_attack import 
+            # return self.shape_invariant_ifgm_bp_mod2(points, target)
         # elif self.attack_method == "ifgm_si_adv_query":
         #     return self.shape_invariant_query_attack(points, target)
         # elif self.attack_method == "ifgm_bp_ours_query":

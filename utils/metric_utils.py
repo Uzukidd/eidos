@@ -43,7 +43,7 @@ class ASR_metric(metric):
     def update(
         self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
     ):
-        asr = self.cls_model(pc_adv).argmax(-1) != self.cls_model(pc_ori).argmax(-1)
+        asr = self.cls_model(pc_adv.transpose(1, 2)).argmax(-1) != self.cls_model(pc_ori.transpose(1, 2)).argmax(-1)
         self.batch_metric.append(asr.float())
 
 

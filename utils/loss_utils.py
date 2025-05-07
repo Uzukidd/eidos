@@ -14,17 +14,16 @@ import torch.optim as optim
 from pytorch3d.ops import knn_gather, knn_points
 from torch.autograd import Variable
 
+from utils.common_utils import _normalize
+
+from typing import Callable
 # from torch.autograd.gradcheck import zero_gradients
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = BASE_DIR + "/../"
-sys.path.append(BASE_DIR)
-sys.path.append(os.path.join(ROOT_DIR, "Model"))
-
-
-def _normalize(input, p=2, dim=1, eps=1e-12):
-    return input / input.norm(p, dim, keepdim=True).clamp(min=eps).expand_as(input)
+# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ROOT_DIR = BASE_DIR + "/../"
+# sys.path.append(BASE_DIR)
+# sys.path.append(os.path.join(ROOT_DIR, "Model"))
 
 
 def norm_l2_loss(adv_pc: torch.Tensor, ori_pc: torch.Tensor):
@@ -39,15 +38,49 @@ def norm_l2_loss(adv_pc: torch.Tensor, ori_pc: torch.Tensor):
     return ((adv_pc - ori_pc) ** 2).sum((1, 2))
 
 
+class loss_wrapper(nn.Module):
+    def __init__(self, loss_func: Callable, channel_first: bool = True, keep_dim: bool = False):
+        super().__init__()
+        self.channel_first = channel_first
+        self.keep_dim = keep_dim
+        self.loss_func = loss_func
+
+    def forward(self, adv_pc: torch.Tensor, ori_pc: torch.Tensor):
+        """
+        Args:
+            adv_pc: [B, 3, N] if self.channel_first else [B, N, 3]
+            ori_pc: [B, 3, N] if self.channel_first else [B, N, 3]
+
+        Returns:
+            scalar if self.keep_dim else [B]
+        """
+        if self.channel_first:
+            adv_pc = adv_pc.transpose(1, 2)
+            ori_pc = ori_pc.transpose(1, 2)
+
+        self.loss: torch.Tensor = self.loss_func(adv_pc, ori_pc)
+
+        if not self.keep_dim:
+            return self.loss.mean()
+
+        return self.loss
+
+
 def chamfer_loss(adv_pc, ori_pc):
+    """
+    Args:
+        adv_pc: [B, N, 3] adversarial point cloud
+        ori_pc: [B, N, 3] original point cloud
+
+    Returns:
+        [B] Symmetric chamfer loss per sample
+    """
     # Chamfer distance (two sides)
-    # intra_dis = ((adv_pc.unsqueeze(3) - ori_pc.unsqueeze(2))**2).sum(1)
-    # dis_loss = intra_dis.min(2)[0].mean(1) + intra_dis.min(1)[0].mean(1)
     adv_KNN = knn_points(
-        adv_pc.permute(0, 2, 1), ori_pc.permute(0, 2, 1), K=1
+        adv_pc, ori_pc, K=1
     )  # [dists:[b,n,1], idx:[b,n,1]]
     ori_KNN = knn_points(
-        ori_pc.permute(0, 2, 1), adv_pc.permute(0, 2, 1), K=1
+        ori_pc, adv_pc, K=1
     )  # [dists:[b,n,1], idx:[b,n,1]]
     dis_loss = adv_KNN.dists.contiguous().squeeze(-1).mean(
         -1
@@ -59,23 +92,89 @@ def chamfer_loss(adv_pc, ori_pc):
 
 def pseudo_chamfer_loss(adv_pc, ori_pc):
     # Chamfer pseudo distance (one side)
-    # intra_dis = ((adv_pc.unsqueeze(3) - ori_pc.unsqueeze(2))**2).sum(1) #b*n*n
-    # dis_loss = intra_dis.min(2)[0].mean(1)
+
     adv_KNN = knn_points(
-        adv_pc.permute(0, 2, 1), ori_pc.permute(0, 2, 1), K=1
+        adv_pc, ori_pc, K=1
     )  # [dists:[b,n,1], idx:[b,n,1]]
     dis_loss = adv_KNN.dists.contiguous().squeeze(-1).mean(-1)  # [b]
     return dis_loss
 
 
 def hausdorff_loss(adv_pc, ori_pc):
-    # dis = ((adv_pc.unsqueeze(3) - ori_pc.unsqueeze(2))**2).sum(1)
-    # hd_loss = torch.max(torch.min(dis, dim=2)[0], dim=1)[0]
+    """
+    Args:
+        adv_pc: [B, N, 3] adversarial point cloud
+        ori_pc: [B, N, 3] original point cloud
+
+    Returns:
+        [B] Hausdorff loss per sample
+    """
     adv_KNN = knn_points(
-        adv_pc.permute(0, 2, 1), ori_pc.permute(0, 2, 1), K=1
+        adv_pc, ori_pc, K=1
     )  # [dists:[b,n,1], idx:[b,n,1]]
     hd_loss = adv_KNN.dists.contiguous().squeeze(-1).max(-1)[0]  # [b]
     return hd_loss
+
+def _get_kappa_ori(pc, normal, k=2):
+    b, _, n = pc.size()
+    inter_KNN = knn_points(
+        pc, pc, K=k + 1
+    )  # [dists:[b,n,k+1], idx:[b,n,k+1]]
+    nn_pts = (
+        knn_gather(pc, inter_KNN.idx)
+        .permute(0, 1, 3, 2)[:, :, :, 1:]
+        .contiguous()
+    )  # [b, n, 3, k]
+    vectors = nn_pts - pc.unsqueeze(3)
+    vectors = _normalize(vectors)
+
+    return torch.abs((vectors * normal.unsqueeze(3)).sum(2)).mean(2)
+
+
+def _get_kappa_adv(adv_pc, ori_pc, ori_normal, k=2):
+    b, n, _ = adv_pc.size()
+
+    intra_KNN = knn_points(
+        adv_pc, ori_pc, K=1
+    )  # [dists:[b,n,1], idx:[b,n,1]]
+    normal = (
+        knn_gather(ori_normal, intra_KNN.idx)
+        .permute(0, 1, 3, 2)
+        .squeeze(3)
+        .contiguous()
+    )  # [b, n, 3]
+
+    # compute knn between advPC and itself to get \|q-p\|_2
+    inter_KNN = knn_points(
+        adv_pc, adv_pc, K=k + 1
+    )  # [dists:[b,n,k+1], idx:[b,n,k+1]]
+    nn_pts = (
+        knn_gather(adv_pc, inter_KNN.idx)
+        .permute(0, 1, 3, 2)[:, :, :, 1:]
+        .contiguous()
+    )  # [b, n, 3 ,k]
+    vectors = nn_pts - adv_pc.unsqueeze(3)
+    vectors = _normalize(vectors)
+
+    return (
+        torch.abs((vectors * normal.unsqueeze(3)).sum(2)).mean(2),
+        normal,
+    )  # [b, n], [b, n, 3]
+
+
+def curvature_loss(adv_pc, ori_pc, adv_kappa, ori_kappa, k=2):
+    b, n, _ = adv_pc.size()
+
+    intra_KNN = knn_points(
+        adv_pc, ori_pc, K=1
+    )  # [dists:[b,n,1], idx:[b,n,1]]
+    onenn_ori_kappa = torch.gather(
+        ori_kappa, 1, intra_KNN.idx.squeeze(-1)
+    ).contiguous()  # [b, n]
+
+    curv_loss = ((adv_kappa - onenn_ori_kappa) ** 2).mean(-1)
+
+    return curv_loss
 
 
 def direction_loss(adv_pc, ori_pc):
@@ -125,72 +224,6 @@ def hausdorff_transform_loss(adv_pc, ori_pc):
 
     return hd_transform_loss
 
-
-def _get_kappa_ori(pc, normal, k=2):
-    b, _, n = pc.size()
-    inter_KNN = knn_points(
-        pc.permute(0, 2, 1), pc.permute(0, 2, 1), K=k + 1
-    )  # [dists:[b,n,k+1], idx:[b,n,k+1]]
-    nn_pts = (
-        knn_gather(pc.permute(0, 2, 1), inter_KNN.idx)
-        .permute(0, 3, 1, 2)[:, :, :, 1:]
-        .contiguous()
-    )  # [b, 3, n ,k]
-    vectors = nn_pts - pc.unsqueeze(3)
-    vectors = _normalize(vectors)
-
-    return torch.abs((vectors * normal.unsqueeze(3)).sum(1)).mean(2)
-
-
-def _get_kappa_adv(adv_pc, ori_pc, ori_normal, k=2):
-    b, _, n = adv_pc.size()
-
-    intra_KNN = knn_points(
-        adv_pc.permute(0, 2, 1), ori_pc.permute(0, 2, 1), K=1
-    )  # [dists:[b,n,1], idx:[b,n,1]]
-    normal = (
-        knn_gather(ori_normal.permute(0, 2, 1), intra_KNN.idx)
-        .permute(0, 3, 1, 2)
-        .squeeze(3)
-        .contiguous()
-    )  # [b, 3, n]
-
-    # compute knn between advPC and itself to get \|q-p\|_2
-    inter_KNN = knn_points(
-        adv_pc.permute(0, 2, 1), adv_pc.permute(0, 2, 1), K=k + 1
-    )  # [dists:[b,n,k+1], idx:[b,n,k+1]]
-    nn_pts = (
-        knn_gather(adv_pc.permute(0, 2, 1), inter_KNN.idx)
-        .permute(0, 3, 1, 2)[:, :, :, 1:]
-        .contiguous()
-    )  # [b, 3, n ,k]
-    vectors = nn_pts - adv_pc.unsqueeze(3)
-    vectors = _normalize(vectors)
-
-    return (
-        torch.abs((vectors * normal.unsqueeze(3)).sum(1)).mean(2),
-        normal,
-    )  # [b, n], [b, 3, n]
-
-
-def curvature_loss(adv_pc, ori_pc, adv_kappa, ori_kappa, k=2):
-    b, _, n = adv_pc.size()
-
-    # intra_dis = ((input_curr_iter.unsqueeze(3) - pc_ori.unsqueeze(2))**2).sum(1)
-    # intra_idx = torch.topk(intra_dis, 1, dim=2, largest=False, sorted=True)[1]
-    # knn_theta_normal = torch.gather(theta_normal, 1, intra_idx.view(b,n).expand(b,n))
-    # curv_loss = ((curv_loss - knn_theta_normal)**2).mean(-1)
-
-    intra_KNN = knn_points(
-        adv_pc.permute(0, 2, 1), ori_pc.permute(0, 2, 1), K=1
-    )  # [dists:[b,n,1], idx:[b,n,1]]
-    onenn_ori_kappa = torch.gather(
-        ori_kappa, 1, intra_KNN.idx.squeeze(-1)
-    ).contiguous()  # [b, n]
-
-    curv_loss = ((adv_kappa - onenn_ori_kappa) ** 2).mean(-1)
-
-    return curv_loss
 
 
 def displacement_loss(adv_pc, ori_pc, k=16):
@@ -244,11 +277,9 @@ def distance_kmean_loss(pc, k):
 
 
 def kNN_smoothing_loss(adv_pc, k, threshold_coef=1.05):
-    b, _, n = adv_pc.size()
-    # dis = ((adv_pc.unsqueeze(3) - adv_pc.unsqueeze(2))**2).sum(1) #[b,n,n]
-    # dis, idx = torch.topk(dis, k+1, dim=2, largest=False, sorted=True)#[b,n,k+1]
+    b, n, _ = adv_pc.size()
     inter_KNN = knn_points(
-        adv_pc.permute(0, 2, 1), adv_pc.permute(0, 2, 1), K=k + 1
+        adv_pc, adv_pc, K=k + 1
     )  # [dists:[b,n,k+1], idx:[b,n,k+1]]
 
     knn_dis = inter_KNN.dists[:, :, 1:].contiguous().mean(-1)  # [b,n]
@@ -279,7 +310,8 @@ def uniform_loss(
         adv_pc_flipped = adv_pc.transpose(1, 2).contiguous()
         new_xyz = (
             pointnet2_utils.gather_operation(
-                adv_pc_flipped, pointnet2_utils.furthest_point_sample(adv_pc, npoint)
+                adv_pc_flipped, pointnet2_utils.furthest_point_sample(
+                    adv_pc, npoint)
             )
             .transpose(1, 2)
             .contiguous()
@@ -340,9 +372,11 @@ def CWLoss(
         logits (torch.cuda.FloatTensor): the predicted logits, [1, num_classes].
         target (torch.cuda.LongTensor): the label for points, [1].
     """
-    target = torch.ones(logits.size(0)).type(torch.cuda.FloatTensor).mul(target.float())
+    target = torch.ones(logits.size(0)).type(
+        torch.cuda.FloatTensor).mul(target.float())
     target_one_hot = Variable(
-        torch.eye(num_classes).type(torch.cuda.FloatTensor)[target.long()].cuda()
+        torch.eye(num_classes).type(
+            torch.cuda.FloatTensor)[target.long()].cuda()
     )
 
     real = torch.sum(target_one_hot * logits, 1)

@@ -25,7 +25,7 @@ from utils.loss_utils import (
 )
 from utils.metric_utils import *
 from utils.modelnet40_utils import ModelNetDataset
-from utils.utils import set_seed
+from utils.common_utils import set_seed
 
 
 def data_preprocess(data: list[torch.Tensor, torch.Tensor]):
@@ -91,8 +91,7 @@ def load_modelnet40_dataset(data_path: str):
     # )
 
     TEST_DATASET = Subset(
-        ModelNetDataset(root=data_path, npoint=8192, split="test", normal_channel=True),
-        indices=list(range(0, 32)),
+        ModelNetDataset(root=data_path, npoint=8192, split="test", normal_channel=True)
     )
 
     test_dataLoader = DataLoader(
@@ -130,10 +129,6 @@ def main():
     elif args.dataset == "ModelNet40Full":
         datas, test_dataLoader = load_modelnet40_dataset(args.data_path)
 
-    total_count = len(datas)
-    # if args.dataset != "ModelNet40Full":
-    #     datas = datas[args.rank * args.rank_count : (args.rank + 1) * args.rank_count]
-
     collector = metric_collector()
     collector.register(ASR_metric(attack.classifier))
     collector.register(L2_metric())
@@ -163,9 +158,6 @@ def main():
     ):
         if batch_id == max_len:
             break
-        # data = list(data)
-        # data[0] = torch.from_numpy(data[0][np.newaxis, :])
-        # data[1] = torch.from_numpy(data[1][np.newaxis, :])
 
         points, target = data_preprocess(data)
         target = target.long()
@@ -190,9 +182,9 @@ def main():
 
         result.append((adv_points.cpu().numpy(), adv_target.cpu().numpy()))
 
-        pc_normal = points[recall, :, -3:].permute(0, 2, 1)
-        pc_ori = points[recall, :, 0:3].permute(0, 2, 1)
-        pc_adv = adv_points[recall, :, :].permute(0, 2, 1)
+        pc_normal = points[recall, :, -3:]
+        pc_ori = points[recall, :, 0:3]
+        pc_adv = adv_points[recall, :, :]
         collector.update(pc_adv, pc_ori, pc_normal)
 
     print(collector.output_str())

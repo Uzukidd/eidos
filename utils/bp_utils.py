@@ -6,30 +6,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils.loss_utils import norm_l2_loss, chamfer_loss, pseudo_chamfer_loss, hausdorff_loss, curvature_loss, kNN_smoothing_loss, _get_kappa_ori, _get_kappa_adv
-
-import timeit
-
-class CodeTimer:
-    def __init__(self, name=None):
-        self.name = " '"  + name + "'" if name else ''
-
-    def __enter__(self):
-        self.start = timeit.default_timer()
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.took = (timeit.default_timer() - self.start) * 1000.0
-        print('Code block' + self.name + ' took: ' + str(self.took) + ' ms')
+from utils.loss_utils import norm_l2_loss, pseudo_chamfer_loss, hausdorff_loss, curvature_loss, _get_kappa_ori, _get_kappa_adv
+from utils.siadv_utils import *
+from utils.common_utils import _normalize
 
 def proj_surface(x, n):
     beta = (x * n).sum((1,2)) / (n * n).sum((1,2))
     alpha = x - beta[:, np.newaxis, np.newaxis] * n
     return alpha
-
-def norm(x):
-    res = (x ** 2).sum((1, 2)).sqrt()
-    res[res == 0] = 1e-12
-    return res
 
 def gram_schmidt(g, delta):
     res = [g]
@@ -38,7 +22,7 @@ def gram_schmidt(g, delta):
         for b in res:
             alpha = proj_surface(alpha, b)
         if (alpha > 1e-12).any():
-            res.append(alpha / norm(alpha)[:, np.newaxis, np.newaxis])
+            res.append(alpha / _normalize(alpha, dim = (1, 2))[:, np.newaxis, np.newaxis])
     return res[1:]
 
 class boundary_projectuion(nn.Module) :
@@ -692,3 +676,8 @@ class boundary_projection_query_si(boundary_projection_3):
         
 
         return points
+    
+# __all__ = {
+#     "bp3": boundary_projection_3,
+#     "bp3_si": boundary_projection_3_si
+# }
