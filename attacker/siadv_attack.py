@@ -34,14 +34,14 @@ class siadv_attack(nn.Module):
         """White-box I-FGSM based on shape-invariant sensitivity maps.
 
         Args:
-            points (torch.cuda.FloatTensor): the point cloud with N points, [1, N, 6].
-            target (torch.cuda.LongTensor): the label for points, [1].
+            points (torch.cuda.FloatTensor): the point cloud with N points, [B, N, 6].
+            target (torch.cuda.LongTensor): the label for points, [B].
         """
-        normal_vec = points[:, :, -3:].data  # N, [1, N, 3]
+        normal_vec = points[:, :, -3:].data  # N, [B, N, 3]
         normal_vec = normal_vec / torch.sqrt(
             torch.sum(normal_vec**2, dim=-1, keepdim=True)
-        )  # N, [1, N, 3]
-        points = points[:, :, :3].data  # P, [1, N, 3]
+        )  # N, [B, N, 3]
+        points = points[:, :, :3].data  # P, [B, N, 3]
         ori_points = points.data
         clip_func = ClipPointsLinf(budget=self.eps)  # * np.sqrt(3*1024))
 

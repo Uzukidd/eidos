@@ -27,8 +27,16 @@ def _normalize(input, p=2, dim=1, eps=1e-12):
     return input / input.norm(p, dim, keepdim=True).clamp(min=eps).expand_as(input)
 
 
-def norm_l2_loss(adv_pc, ori_pc):
-    return ((adv_pc - ori_pc) ** 2).sum(1).sum(1)
+def norm_l2_loss(adv_pc: torch.Tensor, ori_pc: torch.Tensor):
+    """
+    Args:
+        adv_pc: [B, N, 3] adversarial point cloud
+        ori_pc: [B, N, 3] original point cloud
+
+    Returns:
+        [B] L2 loss per sample
+    """
+    return ((adv_pc - ori_pc) ** 2).sum((1, 2))
 
 
 def chamfer_loss(adv_pc, ori_pc):
@@ -120,9 +128,6 @@ def hausdorff_transform_loss(adv_pc, ori_pc):
 
 def _get_kappa_ori(pc, normal, k=2):
     b, _, n = pc.size()
-    # inter_dis = ((pc.unsqueeze(3) - pc.unsqueeze(2))**2).sum(1)
-    # inter_idx = torch.topk(inter_dis, k+1, dim=2, largest=False, sorted=True)[1][:, :, 1:].contiguous()
-    # nn_pts = torch.gather(pc, 2, inter_idx.view(b,1,n*k).expand(b,3,n*k)).view(b,3,n,k)
     inter_KNN = knn_points(
         pc.permute(0, 2, 1), pc.permute(0, 2, 1), K=k + 1
     )  # [dists:[b,n,k+1], idx:[b,n,k+1]]
@@ -134,15 +139,12 @@ def _get_kappa_ori(pc, normal, k=2):
     vectors = nn_pts - pc.unsqueeze(3)
     vectors = _normalize(vectors)
 
-    return torch.abs((vectors * normal.unsqueeze(3)).sum(1)).mean(2)  # [b, n]
+    return torch.abs((vectors * normal.unsqueeze(3)).sum(1)).mean(2)
 
 
 def _get_kappa_adv(adv_pc, ori_pc, ori_normal, k=2):
     b, _, n = adv_pc.size()
-    # compute knn between advPC and oriPC to get normal n_p
-    # intra_dis = ((adv_pc.unsqueeze(3) - ori_pc.unsqueeze(2))**2).sum(1)
-    # intra_idx = torch.topk(intra_dis, 1, dim=2, largest=False, sorted=True)[1]
-    # normal = torch.gather(ori_normal, 2, intra_idx.view(b,1,n).expand(b,3,n))
+
     intra_KNN = knn_points(
         adv_pc.permute(0, 2, 1), ori_pc.permute(0, 2, 1), K=1
     )  # [dists:[b,n,1], idx:[b,n,1]]
@@ -154,9 +156,6 @@ def _get_kappa_adv(adv_pc, ori_pc, ori_normal, k=2):
     )  # [b, 3, n]
 
     # compute knn between advPC and itself to get \|q-p\|_2
-    # inter_dis = ((adv_pc.unsqueeze(3) - adv_pc.unsqueeze(2))**2).sum(1)
-    # inter_idx = torch.topk(inter_dis, k+1, dim=2, largest=False, sorted=True)[1][:, :, 1:].contiguous()
-    # nn_pts = torch.gather(adv_pc, 2, inter_idx.view(b,1,n*k).expand(b,3,n*k)).view(b,3,n,k)
     inter_KNN = knn_points(
         adv_pc.permute(0, 2, 1), adv_pc.permute(0, 2, 1), K=k + 1
     )  # [dists:[b,n,k+1], idx:[b,n,k+1]]

@@ -7,7 +7,8 @@ import time
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
+
 # from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -22,16 +23,17 @@ from utils.loss_utils import (
     norm_l2_loss,
     pseudo_chamfer_loss,
 )
+from utils.metric_utils import *
 from utils.modelnet40_utils import ModelNetDataset
 from utils.utils import set_seed
 
 
-def data_preprocess(data):
+def data_preprocess(data: list[torch.Tensor, torch.Tensor]):
     """Preprocess the given data and label."""
     points, target = data
 
     points = points  # [B, N, C]
-    target = target[:, 0]  # [B]
+    target = target.squeeze(1)  # [B]
 
     points = points.cuda()
     target = target.cuda()
@@ -53,6 +55,32 @@ ten_label_indexes = {
 }
 
 
+def load_partial_modelnet40_dataset(data_path: str):
+    class partial_modelnet40_dataset(Dataset):
+        def __init__(self, pkl_file):
+            with open(pkl_file, "rb") as f:
+                self.data = pkl.load(f)  # list of (points, label)
+
+            # 可选：将所有数据转换为 Tensor（如果你不希望延迟到 __getitem__）
+            # self.data = [(torch.tensor(p, dtype=torch.float32), torch.tensor(l)) for p, l in self.data]
+
+        def __len__(self):
+            return len(self.data)
+
+        def __getitem__(self, idx):
+            points, label = self.data[idx]
+            # 如果 points 是 numpy，这里动态转为 Tensor（更灵活）
+            if not isinstance(points, torch.Tensor):
+                points = torch.tensor(points, dtype=torch.float32)
+            if not isinstance(label, torch.Tensor):
+                label = torch.tensor(label)
+            return points, label
+
+    dataset = partial_modelnet40_dataset(data_path)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=64)
+    return dataset, dataloader
+
+
 def load_modelnet40_dataset(data_path: str):
     # TRAIN_DATASET = ModelNetDataset(
     #     root=data_path, npoint=8192, split="train", normal_channel=False
@@ -62,15 +90,16 @@ def load_modelnet40_dataset(data_path: str):
     #     TRAIN_DATASET, batch_size=batch_size, shuffle=True, num_workers=64
     # )
 
-    TEST_DATASET = ModelNetDataset(
-        root=data_path, npoint=8192, split="test", normal_channel=False
+    TEST_DATASET = Subset(
+        ModelNetDataset(root=data_path, npoint=8192, split="test", normal_channel=True),
+        indices=list(range(0, 32)),
     )
 
-    # test_dataLoader = DataLoader(
-    #     TEST_DATASET, batch_size=batch_size, shuffle=False, num_workers=64
-    # )
+    test_dataLoader = DataLoader(
+        TEST_DATASET, batch_size=8, shuffle=False, num_workers=64
+    )
 
-    return TEST_DATASET #, test_dataLoader
+    return TEST_DATASET, test_dataLoader
 
 
 import line_profiler
@@ -97,28 +126,26 @@ def main():
     recall = []
 
     if args.dataset == "ModelNet40":
-        with open(args.data_path, "rb") as inputs:
-            datas = pkl.load(inputs)
+        datas, test_dataLoader = load_partial_modelnet40_dataset(args.data_path)
     elif args.dataset == "ModelNet40Full":
-        datas = load_modelnet40_dataset(args.data_path)
+        datas, test_dataLoader = load_modelnet40_dataset(args.data_path)
 
     total_count = len(datas)
-    if args.dataset != "ModelNet40Full":
-        datas = datas[args.rank * args.rank_count : (args.rank + 1) * args.rank_count]
+    # if args.dataset != "ModelNet40Full":
+    #     datas = datas[args.rank * args.rank_count : (args.rank + 1) * args.rank_count]
 
-    hd_loss = []
-    d_hd_loss = []
-    cd_loss = []
-    p_cd_loss = []
-    cur_loss = []
-    l2_loss = []
-    smooth_loss = []
-    asr = []
+    collector = metric_collector()
+    collector.register(ASR_metric(attack.classifier))
+    collector.register(L2_metric())
+    collector.register(HD_metric())
+    collector.register(DoubleHD_metric())
+    collector.register(CD_metric())
+    collector.register(PseudoCD_metric())
+    collector.register(Curvature_metric(k=args.curv_loss_knn))
+    collector.register(Smooth_metric(k=args.curv_loss_knn))
 
     avg_time_cost = []
 
-    hd_loss = []
-    result = []
     recall = []
 
     query_costs = []
@@ -131,13 +158,14 @@ def main():
         else:
             max_len = 20
 
-   
-    for batch_id, data in tqdm(enumerate(datas), total=max_len):
+    for batch_id, data in tqdm(
+        enumerate(test_dataLoader), total=test_dataLoader.__len__()
+    ):
         if batch_id == max_len:
             break
-        data = list(data)
-        data[0] = torch.from_numpy(data[0][np.newaxis, :])
-        data[1] = torch.from_numpy(data[1][np.newaxis, :])
+        # data = list(data)
+        # data[0] = torch.from_numpy(data[0][np.newaxis, :])
+        # data[1] = torch.from_numpy(data[1][np.newaxis, :])
 
         points, target = data_preprocess(data)
         target = target.long()
@@ -148,7 +176,7 @@ def main():
                 target[b] = ten_label_indexes[target[b].item()]
 
         with torch.no_grad():
-            recall.append(target.item() == attack.predict(points).item())
+            recall = target == attack.predict(points)
 
         # start attack
         t0 = time.time()
@@ -160,106 +188,17 @@ def main():
 
         adv_target = attack.predict(adv_points)
 
-        asr.append(
-            (adv_target.item() != target.item()) and (not (adv_points == 1).all())
-        )
-
-        with torch.no_grad():
-            pc_normal = points[:, :, -3:].data
-            pc_ori = points[:, :, 0:3].data
-            pc_adv = adv_points[:, :, :].data
-
-            pc_normal = pc_normal.cuda().permute(0, 2, 1)
-            pc_ori = pc_ori.cuda().permute(0, 2, 1)
-            pc_adv = pc_adv.cuda().permute(0, 2, 1)
-
-            if recall[-1] and asr[-1]:
-
-                l2 = norm_l2_loss(pc_adv, pc_ori)
-                l2_loss.append(l2.cpu().detach().numpy())
-
-                hd_1 = hausdorff_loss(pc_adv, pc_ori)
-                hd_loss.append(hd_1.cpu().detach().numpy())
-                hd_2 = hausdorff_loss(pc_ori, pc_adv)
-                d_hd_loss.append(
-                    (hd_2.cpu().detach().numpy() + hd_1.cpu().detach().numpy()).mean()
-                )
-
-                cd = chamfer_loss(pc_adv, pc_ori)
-                cd_loss.append(cd.cpu().detach().numpy())
-
-                p_cd = pseudo_chamfer_loss(pc_adv, pc_ori)
-                p_cd_loss.append(p_cd.cpu().detach().numpy())
-
-                ori_kappa = _get_kappa_ori(pc_ori, pc_normal, args.curv_loss_knn)
-                adv_kappa, normal_curr_iter = _get_kappa_adv(
-                    pc_adv, pc_ori, pc_normal, args.curv_loss_knn
-                )
-                cur = curvature_loss(pc_adv, pc_ori, adv_kappa, ori_kappa).mean().item()
-                cur_loss.append(cur)
-
-                smooth = kNN_smoothing_loss(pc_adv, args.curv_loss_knn)
-                smooth_loss.append(smooth.cpu().detach().numpy())
-
-        points = points[:, :, :3].data  # P, [1, N, 3]
         result.append((adv_points.cpu().numpy(), adv_target.cpu().numpy()))
 
-    if not args.time_verify:
+        pc_normal = points[recall, :, -3:].permute(0, 2, 1)
+        pc_ori = points[recall, :, 0:3].permute(0, 2, 1)
+        pc_adv = adv_points[recall, :, :].permute(0, 2, 1)
+        collector.update(pc_adv, pc_ori, pc_normal)
 
-        data_path = os.path.join(os.path.dirname(args.data_path), args.task_name)
-
-        suffix_adv_name = ".adv"
-
-        suffix_acc_name = ".acc"
-
-        if not os.path.exists(data_path + suffix_adv_name):
-            temp_data = [None] * total_count
-            temp_data[
-                args.rank * args.rank_count : (args.rank + 1) * args.rank_count
-            ] = result
-
-            with open(data_path + suffix_adv_name, "wb") as output:
-                pkl.dump(temp_data, output)
-        else:
-            with open(data_path + suffix_adv_name, "rb") as input:
-                temp_data = pkl.load(input)
-            temp_data[
-                args.rank * args.rank_count : (args.rank + 1) * args.rank_count
-            ] = result
-            with open(data_path + suffix_adv_name, "wb") as output:
-                pkl.dump(temp_data, output)
-
-        if not os.path.exists(data_path + suffix_acc_name):
-            temp_data = [None] * total_count
-            temp_data[
-                args.rank * args.rank_count : (args.rank + 1) * args.rank_count
-            ] = recall
-            with open(data_path + suffix_acc_name, "wb") as output:
-                pkl.dump(temp_data, output)
-        else:
-            with open(data_path + suffix_acc_name, "rb") as input:
-                temp_data = pkl.load(input)
-            temp_data[
-                args.rank * args.rank_count : (args.rank + 1) * args.rank_count
-            ] = recall
-            with open(data_path + suffix_acc_name, "wb") as output:
-                pkl.dump(temp_data, output)
-
-        recall = np.array(recall)
-
-        log = "Result: \n"
-        log += f"Recalled samples:{np.array(recall).sum()}\n"
-        log += f"A.S.R:{np.array(asr)[recall].mean()}\n"
-        log += f"Average L2:{np.array(l2_loss).mean()}±{np.array(l2_loss).std()}\n"
-        log += f"Average HD(double):{np.array(d_hd_loss).mean()}±{np.array(d_hd_loss).std()}\n"
-        log += f"Average HD:{np.array(hd_loss).mean()}±{np.array(hd_loss).std()}\n"
-        log += f"Average Pseudo CD:{np.array(p_cd_loss).mean()}±{np.array(p_cd_loss).std()}\n"
-        log += f"Average CD:{np.array(cd_loss).mean()}±{np.array(cd_loss).std()}\n"
-        log += f"Average Curv:{np.array(cur_loss).mean()}±{np.array(cur_loss).std()}\n"
-        log += f"Average Smooth Loss:{np.array(smooth_loss).mean()}±{np.array(smooth_loss).std()}\n"
-        if not args.query_attack_method is None:
-            log += f"Average Query Cost:{np.array(query_costs).mean()}±{np.array(query_costs).std()}\n"
-        print(log)
+    print(collector.output_str())
+    # if not args.query_attack_method is None:
+    #     log += f"Average Query Cost:{np.array(query_costs).mean()}±{np.array(query_costs).std()}\n"
+    # print(log)
 
     print(f"Average time cost: {np.array(avg_time_cost).mean()}")
 
