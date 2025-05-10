@@ -55,7 +55,7 @@ ten_label_indexes = {
 }
 
 
-def load_partial_modelnet40_dataset(data_path: str):
+def load_partial_modelnet40_dataset(data_path: str, batch_size:int):
     class partial_modelnet40_dataset(Dataset):
         def __init__(self, pkl_file):
             with open(pkl_file, "rb") as f:
@@ -77,11 +77,11 @@ def load_partial_modelnet40_dataset(data_path: str):
             return points, label
 
     dataset = partial_modelnet40_dataset(data_path)
-    dataloader = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=64)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=64)
     return dataset, dataloader
 
 
-def load_modelnet40_dataset(data_path: str):
+def load_modelnet40_dataset(data_path: str, batch_size:int):
     # TRAIN_DATASET = ModelNetDataset(
     #     root=data_path, npoint=8192, split="train", normal_channel=False
     # )
@@ -95,7 +95,7 @@ def load_modelnet40_dataset(data_path: str):
     )
 
     test_dataLoader = DataLoader(
-        TEST_DATASET, batch_size=8, shuffle=False, num_workers=64
+        TEST_DATASET, batch_size=batch_size, shuffle=False, num_workers=64
     )
 
     return TEST_DATASET, test_dataLoader
@@ -125,9 +125,9 @@ def main():
     recall = []
 
     if args.dataset == "ModelNet40":
-        datas, test_dataLoader = load_partial_modelnet40_dataset(args.data_path)
+        datas, test_dataLoader = load_partial_modelnet40_dataset(args.data_path, args.batch_size)
     elif args.dataset == "ModelNet40Full":
-        datas, test_dataLoader = load_modelnet40_dataset(args.data_path)
+        datas, test_dataLoader = load_modelnet40_dataset(args.data_path, args.batch_size)
 
     collector = metric_collector()
     collector.register(ASR_metric(attack.classifier))
@@ -161,7 +161,6 @@ def main():
 
         points, target = data_preprocess(data)
         target = target.long()
-        assert points.device == torch.device("cuda:0")
 
         if args.target_model == "PointNet" or args.target_model == "PointNetPP_ssg":
             for b in range(0, target.size(0)):
@@ -202,7 +201,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=1,
+        default=8,
         metavar="N",
         help="input batch size for training (default: 1)",
     )
@@ -335,8 +334,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--device", default=0, type=int, help="specific device")
     parser.add_argument("--task_name", default=None, type=str, help="specific device")
-    parser.add_argument("--rank", type=int, default=0, help="")
-    parser.add_argument("--rank_count", type=int, default=1000, help="")
+    # parser.add_argument("--rank", type=int, default=0, help="")
+    # parser.add_argument("--rank_count", type=int, default=1000, help="")
 
     parser.add_argument(
         "--stage2_steps", type=float, default=0.030, help="step-size of stage 2"
@@ -344,7 +343,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exponential_step",
         action="store_true",
-        default=False,
         help="Whether to use exponential_step [default: False]",
     )
 

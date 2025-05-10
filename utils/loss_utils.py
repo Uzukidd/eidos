@@ -5,6 +5,7 @@ import math
 import os
 import sys
 import time
+from typing import Callable
 
 import numpy as np
 import torch
@@ -16,7 +17,6 @@ from torch.autograd import Variable
 
 from utils.common_utils import _normalize
 
-from typing import Callable
 # from torch.autograd.gradcheck import zero_gradients
 
 
@@ -25,6 +25,43 @@ from typing import Callable
 # sys.path.append(BASE_DIR)
 # sys.path.append(os.path.join(ROOT_DIR, "Model"))
 
+class loss_wrapper(nn.Module):
+    def __init__(
+        self,
+        loss_func: Callable[..., torch.Tensor],
+        channel_first: bool = True,
+        keep_batch: bool = False,
+        need_normal: bool = False,
+    ):
+        super().__init__()
+        self.channel_first = channel_first
+        self.keep_batch = keep_batch
+        self.loss_func = loss_func
+        self.need_normal = need_normal
+
+    def forward(self, adv_pc: torch.Tensor, ori_pc: torch.Tensor, normal_pc: torch.Tensor = None):
+        """
+        Args:
+            adv_pc: [B, 3, N] if self.channel_first else [B, N, 3]
+            ori_pc: [B, 3, N] if self.channel_first else [B, N, 3]
+            normal_pc: [B, 3, N] if self.channel_first else [B, N, 3]
+
+        Returns:
+            scalar if self.keep_dim else [B]
+        """
+        if self.channel_first:
+            adv_pc = adv_pc.transpose(1, 2)
+            ori_pc = ori_pc.transpose(1, 2)
+
+        if self.need_normal:
+            loss: torch.Tensor = self.loss_func(adv_pc, ori_pc, normal_pc)
+        else:
+            loss: torch.Tensor = self.loss_func(adv_pc, ori_pc)
+
+        if not self.keep_batch:
+            return loss.sum()
+
+        return loss
 
 def norm_l2_loss(adv_pc: torch.Tensor, ori_pc: torch.Tensor):
     """
@@ -38,33 +75,6 @@ def norm_l2_loss(adv_pc: torch.Tensor, ori_pc: torch.Tensor):
     return ((adv_pc - ori_pc) ** 2).sum((1, 2))
 
 
-class loss_wrapper(nn.Module):
-    def __init__(self, loss_func: Callable, channel_first: bool = True, keep_dim: bool = False):
-        super().__init__()
-        self.channel_first = channel_first
-        self.keep_dim = keep_dim
-        self.loss_func = loss_func
-
-    def forward(self, adv_pc: torch.Tensor, ori_pc: torch.Tensor):
-        """
-        Args:
-            adv_pc: [B, 3, N] if self.channel_first else [B, N, 3]
-            ori_pc: [B, 3, N] if self.channel_first else [B, N, 3]
-
-        Returns:
-            scalar if self.keep_dim else [B]
-        """
-        if self.channel_first:
-            adv_pc = adv_pc.transpose(1, 2)
-            ori_pc = ori_pc.transpose(1, 2)
-
-        self.loss: torch.Tensor = self.loss_func(adv_pc, ori_pc)
-
-        if not self.keep_dim:
-            return self.loss.mean()
-
-        return self.loss
-
 
 def chamfer_loss(adv_pc, ori_pc):
     """
@@ -76,12 +86,8 @@ def chamfer_loss(adv_pc, ori_pc):
         [B] Symmetric chamfer loss per sample
     """
     # Chamfer distance (two sides)
-    adv_KNN = knn_points(
-        adv_pc, ori_pc, K=1
-    )  # [dists:[b,n,1], idx:[b,n,1]]
-    ori_KNN = knn_points(
-        ori_pc, adv_pc, K=1
-    )  # [dists:[b,n,1], idx:[b,n,1]]
+    adv_KNN = knn_points(adv_pc, ori_pc, K=1)  # [dists:[b,n,1], idx:[b,n,1]]
+    ori_KNN = knn_points(ori_pc, adv_pc, K=1)  # [dists:[b,n,1], idx:[b,n,1]]
     dis_loss = adv_KNN.dists.contiguous().squeeze(-1).mean(
         -1
     ) + ori_KNN.dists.contiguous().squeeze(-1).mean(
@@ -93,9 +99,7 @@ def chamfer_loss(adv_pc, ori_pc):
 def pseudo_chamfer_loss(adv_pc, ori_pc):
     # Chamfer pseudo distance (one side)
 
-    adv_KNN = knn_points(
-        adv_pc, ori_pc, K=1
-    )  # [dists:[b,n,1], idx:[b,n,1]]
+    adv_KNN = knn_points(adv_pc, ori_pc, K=1)  # [dists:[b,n,1], idx:[b,n,1]]
     dis_loss = adv_KNN.dists.contiguous().squeeze(-1).mean(-1)  # [b]
     return dis_loss
 
@@ -109,65 +113,51 @@ def hausdorff_loss(adv_pc, ori_pc):
     Returns:
         [B] Hausdorff loss per sample
     """
-    adv_KNN = knn_points(
-        adv_pc, ori_pc, K=1
-    )  # [dists:[b,n,1], idx:[b,n,1]]
+    adv_KNN = knn_points(adv_pc, ori_pc, K=1)  # [dists:[b,n,1], idx:[b,n,1]]
     hd_loss = adv_KNN.dists.contiguous().squeeze(-1).max(-1)[0]  # [b]
     return hd_loss
 
+
 def _get_kappa_ori(pc, normal, k=2):
-    b, _, n = pc.size()
-    inter_KNN = knn_points(
-        pc, pc, K=k + 1
-    )  # [dists:[b,n,k+1], idx:[b,n,k+1]]
+    b, n, _ = pc.size()
+    inter_KNN = knn_points(pc, pc, K=k + 1)  # [dists:[b,n,k+1], idx:[b,n,k+1]]
     nn_pts = (
-        knn_gather(pc, inter_KNN.idx)
-        .permute(0, 1, 3, 2)[:, :, :, 1:]
-        .contiguous()
-    )  # [b, n, 3, k]
-    vectors = nn_pts - pc.unsqueeze(3)
+        knn_gather(pc, inter_KNN.idx).permute(0, 3, 1, 2)[:, :, :, 1:].contiguous()
+    )  # [b, 3, n, k]
+    vectors = nn_pts - pc.transpose(1, 2).unsqueeze(3)
     vectors = _normalize(vectors)
 
-    return torch.abs((vectors * normal.unsqueeze(3)).sum(2)).mean(2)
+    return torch.abs((vectors * normal.transpose(1, 2).unsqueeze(3)).sum(1)).mean(2)
 
 
 def _get_kappa_adv(adv_pc, ori_pc, ori_normal, k=2):
     b, n, _ = adv_pc.size()
 
-    intra_KNN = knn_points(
-        adv_pc, ori_pc, K=1
-    )  # [dists:[b,n,1], idx:[b,n,1]]
+    intra_KNN = knn_points(adv_pc, ori_pc, K=1)  # [dists:[b,n,1], idx:[b,n,1]]
     normal = (
         knn_gather(ori_normal, intra_KNN.idx)
-        .permute(0, 1, 3, 2)
+        .permute(0, 3, 1, 2)
         .squeeze(3)
         .contiguous()
-    )  # [b, n, 3]
+    )  # [b, 3, n]
 
     # compute knn between advPC and itself to get \|q-p\|_2
-    inter_KNN = knn_points(
-        adv_pc, adv_pc, K=k + 1
-    )  # [dists:[b,n,k+1], idx:[b,n,k+1]]
+    inter_KNN = knn_points(adv_pc, adv_pc, K=k + 1)  # [dists:[b,n,k+1], idx:[b,n,k+1]]
     nn_pts = (
-        knn_gather(adv_pc, inter_KNN.idx)
-        .permute(0, 1, 3, 2)[:, :, :, 1:]
-        .contiguous()
-    )  # [b, n, 3 ,k]
-    vectors = nn_pts - adv_pc.unsqueeze(3)
+        knn_gather(adv_pc, inter_KNN.idx).permute(0, 3, 1, 2)[:, :, :, 1:].contiguous()
+    )  # [b, 3, n ,k]
+    vectors = nn_pts - adv_pc.transpose(1, 2).unsqueeze(3)
     vectors = _normalize(vectors)
 
     return (
-        torch.abs((vectors * normal.unsqueeze(3)).sum(2)).mean(2),
+        torch.abs((vectors * normal.unsqueeze(3)).sum(1)).mean(2),
         normal,
     )  # [b, n], [b, n, 3]
-
 
 def curvature_loss(adv_pc, ori_pc, adv_kappa, ori_kappa, k=2):
     b, n, _ = adv_pc.size()
 
-    intra_KNN = knn_points(
-        adv_pc, ori_pc, K=1
-    )  # [dists:[b,n,1], idx:[b,n,1]]
+    intra_KNN = knn_points(adv_pc, ori_pc, K=1)  # [dists:[b,n,1], idx:[b,n,1]]
     onenn_ori_kappa = torch.gather(
         ori_kappa, 1, intra_KNN.idx.squeeze(-1)
     ).contiguous()  # [b, n]
@@ -176,6 +166,12 @@ def curvature_loss(adv_pc, ori_pc, adv_kappa, ori_kappa, k=2):
 
     return curv_loss
 
+def local_curvature_loss(adv_pc, ori_pc, ori_normal, k=2):
+    ori_kappa = _get_kappa_ori(ori_pc, ori_normal, k)
+    adv_kappa, _ = _get_kappa_adv(adv_pc, ori_pc, ori_normal, k)
+    local_curv_loss = curvature_loss(adv_pc, ori_pc, adv_kappa, ori_kappa)
+
+    return local_curv_loss
 
 def direction_loss(adv_pc, ori_pc):
     # dis = ((adv_pc.unsqueeze(3) - ori_pc.unsqueeze(2))**2).sum(1)
@@ -223,7 +219,6 @@ def hausdorff_transform_loss(adv_pc, ori_pc):
     hd_transform_loss = (adv_KNN.idx != ori_idx[np.newaxis, :, :]).sum((1, 2))
 
     return hd_transform_loss
-
 
 
 def displacement_loss(adv_pc, ori_pc, k=16):
@@ -278,9 +273,7 @@ def distance_kmean_loss(pc, k):
 
 def kNN_smoothing_loss(adv_pc, k, threshold_coef=1.05):
     b, n, _ = adv_pc.size()
-    inter_KNN = knn_points(
-        adv_pc, adv_pc, K=k + 1
-    )  # [dists:[b,n,k+1], idx:[b,n,k+1]]
+    inter_KNN = knn_points(adv_pc, adv_pc, K=k + 1)  # [dists:[b,n,k+1], idx:[b,n,k+1]]
 
     knn_dis = inter_KNN.dists[:, :, 1:].contiguous().mean(-1)  # [b,n]
     knn_dis_mean = knn_dis.mean(-1)  # [b]
@@ -310,8 +303,7 @@ def uniform_loss(
         adv_pc_flipped = adv_pc.transpose(1, 2).contiguous()
         new_xyz = (
             pointnet2_utils.gather_operation(
-                adv_pc_flipped, pointnet2_utils.furthest_point_sample(
-                    adv_pc, npoint)
+                adv_pc_flipped, pointnet2_utils.furthest_point_sample(adv_pc, npoint)
             )
             .transpose(1, 2)
             .contiguous()
@@ -369,15 +361,10 @@ def CWLoss(
     """Carlini & Wagner attack loss.
 
     Args:
-        logits (torch.cuda.FloatTensor): the predicted logits, [1, num_classes].
-        target (torch.cuda.LongTensor): the label for points, [1].
+        logits (torch.cuda.FloatTensor): the predicted logits, [B, num_classes].
+        target (torch.cuda.LongTensor): the label for points, [B].
     """
-    target = torch.ones(logits.size(0)).type(
-        torch.cuda.FloatTensor).mul(target.float())
-    target_one_hot = Variable(
-        torch.eye(num_classes).type(
-            torch.cuda.FloatTensor)[target.long()].cuda()
-    )
+    target_one_hot = torch.nn.functional.one_hot(target, num_classes).float()
 
     real = torch.sum(target_one_hot * logits, 1)
     if not top5_attack:
@@ -396,3 +383,10 @@ def CWLoss(
         return torch.sum(torch.max(other - real, kappa))
     else:
         return torch.sum(torch.max(real - other, kappa))
+
+__all_loss__ = {
+    "l2": norm_l2_loss,
+    "hd": hausdorff_loss,
+    "cd": pseudo_chamfer_loss,
+    "curv": local_curvature_loss,
+}

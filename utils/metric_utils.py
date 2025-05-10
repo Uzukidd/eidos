@@ -7,9 +7,9 @@ from utils.loss_utils import (
     _get_kappa_adv,
     _get_kappa_ori,
     chamfer_loss,
-    curvature_loss,
     hausdorff_loss,
     kNN_smoothing_loss,
+    local_curvature_loss,
     norm_l2_loss,
     pseudo_chamfer_loss,
 )
@@ -43,7 +43,9 @@ class ASR_metric(metric):
     def update(
         self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
     ):
-        asr = self.cls_model(pc_adv.transpose(1, 2)).argmax(-1) != self.cls_model(pc_ori.transpose(1, 2)).argmax(-1)
+        asr = self.cls_model(pc_adv.transpose(1, 2)).argmax(-1) != self.cls_model(
+            pc_ori.transpose(1, 2)
+        ).argmax(-1)
         self.batch_metric.append(asr.float())
 
 
@@ -103,6 +105,7 @@ class PseudoCD_metric(metric):
         pcd = pseudo_chamfer_loss(pc_adv, pc_ori)
         self.batch_metric.append(pcd)
 
+
 class Curvature_metric(metric):
     def __init__(self, k: int):
         super().__init__("Curvature Loss")
@@ -111,10 +114,9 @@ class Curvature_metric(metric):
     def update(
         self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
     ):
-        ori_kappa = _get_kappa_ori(pc_ori, pc_normal, self.k)
-        adv_kappa, _ = _get_kappa_adv(pc_adv, pc_ori, pc_normal, self.k)
-        cur = curvature_loss(pc_adv, pc_ori, adv_kappa, ori_kappa)
+        cur = local_curvature_loss(pc_adv, pc_ori, pc_normal, self.k)
         self.batch_metric.append(cur)
+
 
 class Smooth_metric(metric):
     def __init__(self, k: int):

@@ -4,13 +4,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from utils.bp_utils import *
 from utils.clip_utils import *
 from utils.loss_utils import *
 from utils.siadv_utils import *
-from utils.bp_utils import *
 
 
-class eidos(nn.Module):
+class eidos_attack(nn.Module):
     def __init__(
         self,
         eps: float,
@@ -20,7 +20,15 @@ class eidos(nn.Module):
         pre_head: Optional[nn.Module],
         num_class: int,
         top5_attack: bool,
-        bp:str
+        # boundary projection arguments
+        bp: str,
+        l2_weight: float,
+        hd_weight: float,
+        cd_weight: float,
+        curv_weight: float,
+        curv_loss_knn: int,
+        stage2_steps: float,
+        exponential_step: bool,
     ):
         super().__init__()
         self.eps = eps
@@ -33,40 +41,52 @@ class eidos(nn.Module):
         self.bp = bp
         self.si_grad_required = False
 
+        self.boundary_projection = boundary_projection_3(
+            l2_weight,
+            hd_weight,
+            cd_weight,
+            curv_weight,
+            curv_loss_knn,
+            step_size,
+            stage2_steps,
+            max_steps,
+            exponential_step,
+        )
+
         # if self.bp_version == "bp4":
         #     self.boundary_projection = boundary_projection_4(self.args)
         # elif self.bp_version == "bp4_si":
         #     self.boundary_projection = boundary_projection_4_si(self.args)
         #     si_grad_required = True
-        elif self.bp_version == "bp3":
-            bp_optims = []
-            if self.l2_weight != 0.0:
-                bp_optims.append("l2")
+        # elif self.bp_version == "bp3":
+        #     bp_optims = []
+        #     if self.l2_weight != 0.0:
+        #         bp_optims.append("l2")
 
-            if self.hd_weight != 0.0:
-                bp_optims.append("hd")
+        #     if self.hd_weight != 0.0:
+        #         bp_optims.append("hd")
 
-            if self.curv_weight != 0.0:
-                bp_optims.append("curv")
+        #     if self.curv_weight != 0.0:
+        #         bp_optims.append("curv")
 
-            if self.cd_weight != 0.0:
-                bp_optims.append("cd")
-            bp = boundary_projection_3(self.args, bp_optims)
-        elif self.bp_version == "bp3_si":
-            bp_optims = []
-            if self.l2_weight != 0.0:
-                bp_optims.append("l2")
+        #     if self.cd_weight != 0.0:
+        #         bp_optims.append("cd")
+        #     bp = boundary_projection_3(self.args, bp_optims)
+        # elif self.bp_version == "bp3_si":
+        #     bp_optims = []
+        #     if self.l2_weight != 0.0:
+        #         bp_optims.append("l2")
 
-            if self.hd_weight != 0.0:
-                bp_optims.append("hd")
+        #     if self.hd_weight != 0.0:
+        #         bp_optims.append("hd")
 
-            if self.curv_weight != 0.0:
-                bp_optims.append("curv")
+        #     if self.curv_weight != 0.0:
+        #         bp_optims.append("curv")
 
-            if self.cd_weight != 0.0:
-                bp_optims.append("cd")
-            bp = boundary_projection_3_si(self.args, bp_optims)
-            si_grad_required = True
+        #     if self.cd_weight != 0.0:
+        #         bp_optims.append("cd")
+        #     bp = boundary_projection_3_si(self.args, bp_optims)
+        #     si_grad_required = True
         # elif self.bp_version == "bp2":
         #     bp_weights = []
         #     bp_optims = []
@@ -121,24 +141,22 @@ class eidos(nn.Module):
             points (torch.cuda.FloatTensor): the point cloud with N points, [B, N, 6].
             target (torch.cuda.LongTensor): the label for points, [B].
         """
-        normal_vec = points[:, :, -3:].data  # N, [1, N, 3]
+        normal_vec = points[:, :, -3:].detach()  # N, [1, N, 3]
         normal_vec = normal_vec / torch.sqrt(
             torch.sum(normal_vec**2, dim=-1, keepdim=True)
         )  # N, [1, N, 3]
-        points = points[:, :, :3].data  # P, [1, N, 3]
-        ori_points = points.data
+        points = points[:, :, :3].detach()  # P, [1, N, 3]
+        ori_points = points.detach()
         clip_func = ClipPointsLinf(budget=self.eps)  # * np.sqrt(3*1024))
-
-        si_grad_required = False
-
         stage2 = False
 
-        output_points = points
-        output_reg = torch.ones((points.size(0), 4)).cuda() * 1e10
+        self.boundary_projection.reset(points.size(0))
+
+        # output_reg = torch.ones((points.size(0), 4)).cuda() * 1e10
 
         for i in range(self.max_steps):
             # print(self.max_steps)
-            bp.epoch = i
+            # bp.epoch = i
 
             if not stage2:
                 # P -> P', detach()
@@ -153,21 +171,19 @@ class eidos(nn.Module):
                 )
                 points = points.transpose(1, 2)  # P, [1, 3, N]
                 # get white-box gradients
-                if not self.defense_method is None:
-                    logits = self.wb_classifier(self.pre_head(points))
-                else:
-                    logits = self.wb_classifier(points)
-                loss = self.CWLoss(
+                logits = self.classifier(self.pre_head(points))
+
+                loss = CWLoss(
                     logits, target, kappa=0.0, tar=False, num_classes=self.num_class
                 )
-                self.wb_classifier.zero_grad()
+                self.classifier.zero_grad()
                 loss.backward()
-                # print(loss.item(), logits.max(1)[1], target)
                 grad = new_points.grad.data  # g, [1, N, 3]
                 grad[:, :, 2] = 0.0
                 # update P', P and N
                 # # Linf
                 # new_points = new_points - self.step_size * torch.sign(grad)
+
                 # L2
                 norm = torch.sum(grad**2, dim=[1, 2]) ** 0.5
                 new_points = new_points - self.step_size * np.sqrt(3 * 1024) * grad / (
@@ -185,118 +201,86 @@ class eidos(nn.Module):
 
                 normal_vec = get_normal_vector(points)  # N, [1, N, 3]
 
-                if not self.defense_method is None:
-                    logits = self.wb_classifier(self.pre_head(points.transpose(1, 2)))
-                else:
-                    logits = self.wb_classifier(points.transpose(1, 2))
+                logits = self.classifier(self.pre_head(points.transpose(1, 2)))
 
-                logits = logits.argmax(-1).item()
-                stage2 = logits != target.item()
-                reg_loss = torch.zeros_like(output_reg).cuda()
-
-                if self.l2_weight != 0.0:
-                    reg_loss_l2 = self.get_loss(points, ori_points, None, "l2")
-                    reg_loss[:, 0] = reg_loss_l2
-
-                if self.hd_weight != 0.0:
-                    reg_loss_hd = self.get_loss(points, ori_points, None, "hd")
-                    reg_loss[:, 1] = reg_loss_hd
-
-                if self.cd_weight != 0.0:
-                    reg_loss_cd = self.get_loss(points, ori_points, None, "cd")
-                    reg_loss[:, 2] = reg_loss_cd
-
-                if self.curv_weight != 0.0:
-                    reg_loss_curv = self.get_loss(points, ori_points, normal_vec, "curv")
-                    reg_loss[:, 3] = reg_loss_curv
-
-                if logits != target.item() and (reg_loss <= output_reg).all():
-                    output_points = points.detach()
-                    output_reg = reg_loss
+                logits = logits.argmax(-1)
+                stage2 = (logits != target).all()
 
             else:
-
                 points = points.detach()
                 points.requires_grad = True
 
-                if not si_grad_required:
+                logits = self.classifier(self.pre_head(points.transpose(1, 2)))
 
-                    if not self.defense_method is None:
-                        logits = self.wb_classifier(self.pre_head(points.transpose(1, 2)))
-                    else:
-                        logits = self.wb_classifier(points.transpose(1, 2))
+                logits = F.log_softmax(logits, dim=-1)
+                loss = logits.gather(dim=1, index=target.unsqueeze(1)).sum()
+                self.classifier.zero_grad()
+                loss.backward()
 
-                    logits = F.log_softmax(logits, dim=-1)
-                    loss = logits[:, target.item()]
-                    self.wb_classifier.zero_grad()
-                    loss.backward()
+                g = points.grad.detach()
 
-                    g = points.grad.detach()
+                g_norm = (g**2).sum((1, 2)).sqrt()
+                g_norm.clamp_(min=1e-12)
+                g_hat = g / g_norm[:, None, None]
 
-                    g_norm = (g**2).sum((1, 2)).sqrt()
-                    g_norm[g_norm == 0] = 1e-12
-                    g_hat = g / g_norm[:, None, None]
+                points = self.boundary_projection(
+                    points, ori_points, normal_vec, g_hat, logits, target
+                )
 
-                    points = bp(points, ori_points, normal_vec, g_hat, logits, target)
+                normal_vec = get_normal_vector(points)
 
-                    normal_vec = get_normal_vector(points)
+                # else:
 
-                else:
+                # new_points, spin_axis_matrix, translation_matrix = (
+                #     get_transformed_point_cloud(points, normal_vec)
+                # )
+                # new_points = new_points.detach()
+                # new_points.requires_grad = True
 
-                    new_points, spin_axis_matrix, translation_matrix = (
-                        get_transformed_point_cloud(points, normal_vec)
-                    )
-                    new_points = new_points.detach()
-                    new_points.requires_grad = True
+                # points = get_original_point_cloud(
+                #     new_points, spin_axis_matrix, translation_matrix
+                # )
 
-                    points = get_original_point_cloud(
-                        new_points, spin_axis_matrix, translation_matrix
-                    )
-                    if not self.defense_method is None:
-                        logits = self.wb_classifier(self.pre_head(points.transpose(1, 2)))
-                    else:
-                        logits = self.wb_classifier(points.transpose(1, 2))
+                # logits = self.classifier(self.pre_head(points.transpose(1, 2)))
 
-                    logits = F.log_softmax(logits, dim=-1)
-                    loss = logits[:, target.item()]
-                    self.wb_classifier.zero_grad()
-                    loss.backward()
+                # logits = F.log_softmax(logits, dim=-1)
+                # loss = logits[:, target.item()]
+                # self.classifier.zero_grad()
+                # loss.backward()
 
-                    g = new_points.grad.detach().clone()
-                    g[:, :, 2] = 0.0
+                # g = new_points.grad.detach().clone()
+                # g[:, :, 2] = 0.0
 
-                    new_points.grad.zero_()
+                # new_points.grad.zero_()
 
-                    g_norm = (g**2).sum((1, 2)).sqrt()
-                    g_norm[g_norm == 0] = 1e-12
-                    g_hat = g / g_norm[:, None, None]
+                # g_norm = (g**2).sum((1, 2)).sqrt()
+                # g_norm[g_norm == 0] = 1e-12
+                # g_hat = g / g_norm[:, None, None]
 
-                    normal_vec = torch.zeros_like(normal_vec)
-                    normal_vec[:, :, 2] = 1
+                # normal_vec = torch.zeros_like(normal_vec)
+                # normal_vec[:, :, 2] = 1
 
-                    points = bp(
-                        new_points,
-                        spin_axis_matrix,
-                        translation_matrix,
-                        ori_points,
-                        normal_vec,
-                        g_hat,
-                        logits,
-                        target,
-                    )
+                # points = self.boundary_projection(
+                #     new_points,
+                #     spin_axis_matrix,
+                #     translation_matrix,
+                #     ori_points,
+                #     normal_vec,
+                #     g_hat,
+                #     logits,
+                #     target,
+                # )
 
-                    normal_vec = get_normal_vector(points)
+                # normal_vec = get_normal_vector(points)
 
         with torch.no_grad():
-            if not bp.output_points is None:
-                adv_points = bp.output_points.clone()
-            else:
-                adv_points = points.clone()
-
-            if not self.defense_method is None:
-                adv_logits = self.classifier(self.pre_head(adv_points.transpose(1, 2)))
-            else:
-                adv_logits = self.classifier(adv_points.transpose(1, 2))
+            # if not bp.output_points is None:
+            #     adv_points = bp.output_points.clone()
+            # else:
+            #     adv_points = points.clone()
+            adv_points = self.boundary_projection.output_points.clone()
+            adv_logits = self.classifier(
+                self.pre_head(adv_points.transpose(1, 2)))
             adv_target = adv_logits.argmax(-1)
 
         if self.top5_attack:

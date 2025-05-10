@@ -56,6 +56,7 @@ class PointCloudAttack(object):
         self.num_class = args.num_class
         self.bp_version = args.bp_version
         self.stage2_steps = args.stage2_steps
+        self.exponential_step = args.exponential_step
 
         assert args.transfer_attack_method is None or args.query_attack_method is None
         assert (
@@ -91,8 +92,27 @@ class PointCloudAttack(object):
                 self.top5_attack,
             )
         elif self.attack_method == "ifgm_bp_ours":
-            pass
-            # from attacker.eidos_attack import 
+            from attacker.eidos_attack import eidos_attack
+
+            self.attacker = eidos_attack(
+                self.eps,
+                self.step_size,
+                self.max_steps,
+                self.classifier,
+                self.pre_head,
+                self.num_class,
+                self.top5_attack,
+                # bp arguments
+                self.bp_version,
+                self.l2_weight,
+                self.hd_weight,
+                self.cd_weight,
+                self.curv_weight,
+                self.curv_loss_knn,
+                self.stage2_steps,
+                self.exponential_step,
+            )
+            # from attacker.eidos_attack import
             # return self.shape_invariant_ifgm_bp_mod2(points, target)
         # elif self.attack_method == "ifgm_si_adv_query":
         #     return self.shape_invariant_query_attack(points, target)
