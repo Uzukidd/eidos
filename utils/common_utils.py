@@ -12,6 +12,9 @@ import datetime
 import torch.nn.functional as F
 
 
+def _normalize(input, p=2, dim=1, eps=1e-12):
+    return input / input.norm(p, dim, keepdim=True).clamp(min=eps).expand_as(input)
+
 def to_categorical(y, num_classes):
     """ 1-hot encodes a tensor """
     new_y = torch.eye(num_classes)[y.cpu().data.numpy(),]

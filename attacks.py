@@ -1,37 +1,40 @@
+import importlib
 import os
 import sys
-import numpy as np
-import importlib
-# import open3d as o3d
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.distributions import Categorical
 
-from utils.loss_utils import norm_l2_loss, pseudo_chamfer_loss, hausdorff_loss, curvature_loss, _get_kappa_ori, _get_kappa_adv
-from utils.bp_utils import *
-
+from attacker import GSDA_attack, geoA3_attack
 from baselines import *
-from attacker import geoA3_attack, GSDA_attack
-
-
+from model.classifier.pointbert_cls import pointbert_cls
 from models import build_model_from_cfg, load_point_bert
-import os
+from utils.bp_utils import *
 from utils.config_pointbert import *
-import numpy as np
+from utils.loss_utils import (
+    _get_kappa_adv,
+    _get_kappa_ori,
+    curvature_loss,
+    hausdorff_loss,
+    norm_l2_loss,
+    pseudo_chamfer_loss,
+)
+
+# import open3d as o3d
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
-sys.path.append(os.path.join(ROOT_DIR, 'model/classifier'))
+sys.path.append(os.path.join(ROOT_DIR, "model/classifier"))
 
 
 class PointCloudAttack(object):
     def __init__(self, args):
-        """Shape-invariant Adversarial Attack for 3D Point Clouds.
-        """
+        """Shape-invariant Adversarial Attack for 3D Point Clouds."""
         self.args = args
         self.device = args.device
         self.recall = []
@@ -53,16 +56,84 @@ class PointCloudAttack(object):
         self.num_class = args.num_class
         self.bp_version = args.bp_version
         self.stage2_steps = args.stage2_steps
+        self.exponential_step = args.exponential_step
 
         assert args.transfer_attack_method is None or args.query_attack_method is None
-        assert not args.transfer_attack_method is None or not args.query_attack_method is None
-        self.attack_method = args.transfer_attack_method if args.query_attack_method is None else args.query_attack_method
+        assert (
+            not args.transfer_attack_method is None
+            or not args.query_attack_method is None
+        )
+        self.attack_method = (
+            args.transfer_attack_method
+            if args.query_attack_method is None
+            else args.query_attack_method
+        )
 
         self.build_models()
+
         self.defense_method = args.defense_method
-        self.pre_head = None
+        self.pre_head = nn.Identity()
         if not args.defense_method is None:
             self.pre_head = self.get_defense_head(args.defense_method)
+
+        self.build_attack()
+
+    def build_attack(self):
+        if self.attack_method == "ifgm_si_adv":
+            from attacker.siadv_attack import siadv_attack
+
+            self.attacker = siadv_attack(
+                self.eps,
+                self.step_size,
+                self.max_steps,
+                self.classifier,
+                self.pre_head,
+                self.num_class,
+                self.top5_attack,
+            )
+        elif self.attack_method == "ifgm_bp_ours":
+            from attacker.eidos_attack import eidos_attack
+
+            self.attacker = eidos_attack(
+                self.eps,
+                self.step_size,
+                self.max_steps,
+                self.classifier,
+                self.pre_head,
+                self.num_class,
+                self.top5_attack,
+                # bp arguments
+                self.bp_version,
+                self.l2_weight,
+                self.hd_weight,
+                self.cd_weight,
+                self.curv_weight,
+                self.curv_loss_knn,
+                self.stage2_steps,
+                self.exponential_step,
+            )
+            # from attacker.eidos_attack import
+            # return self.shape_invariant_ifgm_bp_mod2(points, target)
+        # elif self.attack_method == "ifgm_si_adv_query":
+        #     return self.shape_invariant_query_attack(points, target)
+        # elif self.attack_method == "ifgm_bp_ours_query":
+        #     return self.shape_invariant_ifgm_bp_query_attack(points, target)
+        # elif self.attack_method == "ifgm_si_bp":
+        #     return self.shape_invariant_ifgm_si_bp(points, target)
+        # elif self.attack_method == "ifgm_bp":
+        #     return self.ifgm_bp(points, target)
+        # elif self.attack_method == "geoa3":
+        #     return self.geoa3_attack(points, target)
+        # elif self.attack_method == "gsda":
+        #     return self.gsda_attack(points, target)
+        # elif self.attack_method == "gsda_bp":
+        #     return self.gsda_attack_bp(points, target)
+        # elif self.attack_method == "simba":
+        #     return self.simba_attack(points, target)
+        # elif self.attack_method == "simbapp":
+        #     return self.simbapp_attack(points, target)
+        else:
+            NotImplementedError
 
     def get_delta(self, points, ori_points, normal_vec, reg_type="l2"):
         points = points.detach()
@@ -88,11 +159,20 @@ class PointCloudAttack(object):
 
         return delta.detach(), loss.detach()
 
-    def get_delta_si(self, new_points, spin_axis_matrix, translation_matrix, ori_points, normal_vec, reg_type="l2"):
+    def get_delta_si(
+        self,
+        new_points,
+        spin_axis_matrix,
+        translation_matrix,
+        ori_points,
+        normal_vec,
+        reg_type="l2",
+    ):
         new_points = new_points.detach()
         new_points.requires_grad = True
         points = get_original_point_cloud(
-            new_points, spin_axis_matrix, translation_matrix)
+            new_points, spin_axis_matrix, translation_matrix
+        )
         if reg_type == "l2":
             loss = self.get_loss(points, ori_points, normal_vec, reg_type)
             loss.backward()
@@ -144,48 +224,60 @@ class PointCloudAttack(object):
         if loss_type == "l2":
             loss = norm_l2_loss(points, ori_points)
         elif loss_type == "curv":
-            ori_kappa = _get_kappa_ori(ori_points.transpose(
-                1, 2), normal_vec.transpose(1, 2), self.curv_loss_knn)
-            adv_kappa, normal_curr_iter = _get_kappa_adv(points.transpose(
-                1, 2), ori_points.transpose(1, 2), normal_vec.transpose(1, 2), self.curv_loss_knn)
-            loss = curvature_loss(points.transpose(
-                1, 2), ori_points.transpose(1, 2), adv_kappa, ori_kappa).mean()
+            ori_kappa = _get_kappa_ori(
+                ori_points.transpose(1, 2),
+                normal_vec.transpose(1, 2),
+                self.curv_loss_knn,
+            )
+            adv_kappa, normal_curr_iter = _get_kappa_adv(
+                points.transpose(1, 2),
+                ori_points.transpose(1, 2),
+                normal_vec.transpose(1, 2),
+                self.curv_loss_knn,
+            )
+            loss = curvature_loss(
+                points.transpose(1, 2), ori_points.transpose(1, 2), adv_kappa, ori_kappa
+            ).mean()
         elif loss_type == "hd":
-            loss = hausdorff_loss(points.transpose(
-                1, 2), ori_points.transpose(1, 2))
+            loss = hausdorff_loss(points.transpose(1, 2), ori_points.transpose(1, 2))
         elif loss_type == "cd":
-            loss = pseudo_chamfer_loss(points.transpose(
-                1, 2), ori_points.transpose(1, 2))
+            loss = pseudo_chamfer_loss(
+                points.transpose(1, 2), ori_points.transpose(1, 2)
+            )
         else:
             raise NotImplementedError
 
         return loss
 
     def build_models(self):
-        """Build white-box surrogate model and black-box target model.
-        """
+        """Build white-box surrogate model and black-box target model."""
         if self.args.surrogate_model == "point_transformer":
             wb_classifier = self.build_models_aux()
+        elif self.args.surrogate_model == "pointllm_bert":
+            wb_classifier = pointbert_cls.create_pointbert_cls(
+                "model/classifier/pointbert/PointTransformer_8192point_2layer.yaml",
+                None,
+            )
+            wb_classifier = self.load_models(wb_classifier, self.args.surrogate_model)
         else:
             # load white-box surrogate models
             MODEL = importlib.import_module(self.args.surrogate_model)
-            wb_classifier = MODEL.get_model(
-                self.num_class,
-                normal_channel=self.normal
-            )
+            wb_classifier = MODEL.get_model(self.num_class, normal_channel=self.normal)
             wb_classifier = wb_classifier.to(self.args.device)
-            wb_classifier = self.load_models(
-                wb_classifier, self.args.surrogate_model)
+            wb_classifier = self.load_models(wb_classifier, self.args.surrogate_model)
 
         if self.args.target_model == "point_transformer":
             classifier = self.build_models_aux()
+        elif self.args.target_model == "pointllm_bert":
+            classifier = pointbert_cls.create_pointbert_cls(
+                "model/classifier/pointbert/PointTransformer_8192point_2layer.yaml",
+                None,
+            )
+            classifier = self.load_models(classifier, self.args.target_model)
         else:
             # load black-box target models
             MODEL = importlib.import_module(self.args.target_model)
-            classifier = MODEL.get_model(
-                self.num_class,
-                normal_channel=self.normal
-            )
+            classifier = MODEL.get_model(self.num_class, normal_channel=self.normal)
             classifier = classifier.to(self.args.device)
             classifier = self.load_models(classifier, self.args.target_model)
         # set eval
@@ -193,8 +285,7 @@ class PointCloudAttack(object):
         self.classifier = classifier.to(self.args.device).eval()
 
     def build_models_aux(self):
-        """Build point_transformer.
-        """
+        """Build point_transformer."""
         CKPT_PATH = "./checkpoint/ModelNet40/PointTransformer_ModelNet1024points.pth"
         MODEL_CFG_PATH = "./cfgs/ModelNet_models/PointTransformer.yaml"
 
@@ -205,73 +296,96 @@ class PointCloudAttack(object):
         return base_model.cuda()
 
     def load_models(self, classifier, model_name):
-        """Load white-box surrogate model and black-box target model.
-        """
-        model_path = os.path.join(
-            './checkpoint/' + self.args.dataset, model_name)
-        if os.path.exists(model_path + '.pth'):
-            checkpoint = torch.load(model_path + '.pth', weights_only=False, map_location=self.args.device)
-        elif os.path.exists(model_path + '.t7'):
-            checkpoint = torch.load(model_path + '.t7', weights_only=False, map_location=self.args.device)
-        elif os.path.exists(model_path + '.tar'):
-            checkpoint = torch.load(model_path + '.tar', weights_only=False, map_location=self.args.device)
+        """Load white-box surrogate model and black-box target model."""
+        model_path = os.path.join("./checkpoint/" + self.args.dataset, model_name)
+        print(model_path)
+        if os.path.exists(model_path + ".pth"):
+            checkpoint = torch.load(
+                model_path + ".pth", weights_only=False, map_location=self.args.device
+            )
+        elif os.path.exists(model_path + ".t7"):
+            checkpoint = torch.load(
+                model_path + ".t7", weights_only=False, map_location=self.args.device
+            )
+        elif os.path.exists(model_path + ".tar"):
+            checkpoint = torch.load(
+                model_path + ".tar", weights_only=False, map_location=self.args.device
+            )
         else:
             raise NotImplementedError
 
         try:
-            if 'model_state_dict' in checkpoint:
-                classifier.load_state_dict(checkpoint['model_state_dict'])
-            elif 'model_state' in checkpoint:
-                classifier.load_state_dict(checkpoint['model_state'])
-            elif 'state_dict' in checkpoint:
-                classifier.load_state_dict(checkpoint['state_dict'])
+            if "model_state_dict" in checkpoint:
+                classifier.load_state_dict(checkpoint["model_state_dict"])
+            elif "model_state" in checkpoint:
+                classifier.load_state_dict(checkpoint["model_state"])
+            elif "state_dict" in checkpoint:
+                classifier.load_state_dict(checkpoint["state_dict"])
             else:
                 classifier.load_state_dict(checkpoint)
         except:
+            print("Model loading failed")
             classifier = nn.DataParallel(classifier)
             classifier.load_state_dict(checkpoint)
         return classifier
 
-    def gsda_boundary_projection_2(self, ori_points, _x, v, factor, mask, normal_vec, target, output_points, output_reg, initial_lr, gamma, i):
+    def gsda_boundary_projection_2(
+        self,
+        ori_points,
+        _x,
+        v,
+        factor,
+        mask,
+        normal_vec,
+        target,
+        output_points,
+        output_reg,
+        initial_lr,
+        gamma,
+        i,
+    ):
         factor = factor.detach()
         factor.requires_grad = True
         gft = factor * mask + _x
-        points = torch.einsum('bij,bjk->bik', v, gft)
+        points = torch.einsum("bij,bjk->bik", v, gft)
 
         reg_loss = torch.zeros_like(output_reg).cuda()
         delta = torch.zeros(points.size()).cuda()
 
         if self.l2_weight != 0.0:
             delta_l2, reg_loss_l2 = self.get_delta_gsda(
-                points, factor, ori_points, None, "l2")
-            delta_l2_norm = (delta_l2 ** 2).sum((1, 2)).sqrt()
+                points, factor, ori_points, None, "l2"
+            )
+            delta_l2_norm = (delta_l2**2).sum((1, 2)).sqrt()
             delta_l2_norm[delta_l2_norm == 0] = 1e-12
             delta += self.l2_weight * delta_l2 / delta_l2_norm[:, None, None]
             reg_loss[:, 0] = reg_loss_l2
 
         if self.hd_weight != 0.0:
             delta_hd, reg_loss_hd = self.get_delta_gsda(
-                points, factor, ori_points, None, "hd")
-            delta_hd_norm = (delta_hd ** 2).sum((1, 2)).sqrt()
+                points, factor, ori_points, None, "hd"
+            )
+            delta_hd_norm = (delta_hd**2).sum((1, 2)).sqrt()
             delta_hd_norm[delta_hd_norm == 0] = 1e-12
             delta += self.hd_weight * delta_hd / delta_hd_norm[:, None, None]
             reg_loss[:, 1] = reg_loss_hd
 
         if self.cd_weight != 0.0:
             delta_cd, reg_loss_cd = self.get_delta_gsda(
-                points, factor, ori_points, None, "cd")
-            delta_cd_norm = (delta_cd ** 2).sum((1, 2)).sqrt()
+                points, factor, ori_points, None, "cd"
+            )
+            delta_cd_norm = (delta_cd**2).sum((1, 2)).sqrt()
             delta_cd_norm[delta_cd_norm == 0] = 1e-12
             delta += self.cd_weight * delta_cd / delta_cd_norm[:, None, None]
             reg_loss[:, 2] = reg_loss_cd
 
         if self.curv_weight != 0.0:
             delta_curv, reg_loss_curv = self.get_delta_gsda(
-                points, factor, ori_points, normal_vec, "curv")
-            delta_curv_norm = (delta_curv ** 2).sum((1, 2)).sqrt()
+                points, factor, ori_points, normal_vec, "curv"
+            )
+            delta_curv_norm = (delta_curv**2).sum((1, 2)).sqrt()
             delta_curv_norm[delta_curv_norm == 0] = 1e-12
-            delta += self.curv_weight * delta_curv / \
-                delta_curv_norm[:, None, None]
+            delta += self.curv_weight * delta_curv / delta_curv_norm[:, None, None]
             reg_loss[:, 3] = reg_loss_curv
 
         if not self.defense_method is None:
@@ -286,7 +400,7 @@ class PointCloudAttack(object):
 
         g = factor.grad.detach()
 
-        g_norm = (g ** 2).sum((1, 2)).sqrt()
+        g_norm = (g**2).sum((1, 2)).sqrt()
         g_norm[g_norm == 0] = 1e-12
         g_hat = g / g_norm[:, None, None]
 
@@ -312,34 +426,6 @@ class PointCloudAttack(object):
 
         return factor, output_points, output_reg, initial_lr
 
-    def CWLoss(self, logits, target, kappa=0, tar=False, num_classes=40):
-        """Carlini & Wagner attack loss. 
-
-        Args:
-            logits (torch.cuda.FloatTensor): the predicted logits, [1, num_classes].
-            target (torch.cuda.LongTensor): the label for points, [1].
-        """
-        target = torch.ones(logits.size(0)).type(
-            torch.cuda.FloatTensor).mul(target.float())
-        target_one_hot = Variable(torch.eye(num_classes).type(
-            torch.cuda.FloatTensor)[target.long()].cuda())
-
-        real = torch.sum(target_one_hot*logits, 1)
-        if not self.top5_attack:
-            # top-1 attack
-            other = torch.max((1-target_one_hot)*logits -
-                              (target_one_hot*10000), 1)[0]
-        else:
-            # top-5 attack
-            other = torch.topk((1-target_one_hot)*logits -
-                               (target_one_hot*10000), 5)[0][:, 4]
-        kappa = torch.zeros_like(other).fill_(kappa)
-
-        if tar:
-            return torch.sum(torch.max(other-real, kappa))
-        else:
-            return torch.sum(torch.max(real-other, kappa))
-
     def run(self, points, target):
         """Main attack method.
 
@@ -347,30 +433,31 @@ class PointCloudAttack(object):
             points (torch.cuda.FloatTensor): the point cloud with N points, [1, N, 6].
             target (torch.cuda.LongTensor): the label for points, [1].
         """
-        if self.attack_method == 'ifgm_si_adv':
-            return self.shape_invariant_ifgm(points, target)
-        elif self.attack_method == 'ifgm_bp_ours':
-            return self.shape_invariant_ifgm_bp_mod2(points, target)
-        elif self.attack_method == 'ifgm_si_adv_query':
-            return self.shape_invariant_query_attack(points, target)
-        elif self.attack_method == 'ifgm_bp_ours_query':
-            return self.shape_invariant_ifgm_bp_query_attack(points, target)
-        elif self.attack_method == 'ifgm_si_bp':
-            return self.shape_invariant_ifgm_si_bp(points, target)
-        elif self.attack_method == "ifgm_bp":
-            return self.ifgm_bp(points, target)
-        elif self.attack_method == 'geoa3':
-            return self.geoa3_attack(points, target)
-        elif self.attack_method == 'gsda':
-            return self.gsda_attack(points, target)
-        elif self.attack_method == 'gsda_bp':
-            return self.gsda_attack_bp(points, target)
-        elif self.attack_method == 'simba':
-            return self.simba_attack(points, target)
-        elif self.attack_method == 'simbapp':
-            return self.simbapp_attack(points, target)
-        else:
-            NotImplementedError
+        return self.attacker(points, target)
+        # if self.attack_method == "ifgm_si_adv":
+        #     return self.shape_invariant_ifgm(points, target)
+        # elif self.attack_method == "ifgm_bp_ours":
+        #     return self.shape_invariant_ifgm_bp_mod2(points, target)
+        # elif self.attack_method == "ifgm_si_adv_query":
+        #     return self.shape_invariant_query_attack(points, target)
+        # elif self.attack_method == "ifgm_bp_ours_query":
+        #     return self.shape_invariant_ifgm_bp_query_attack(points, target)
+        # elif self.attack_method == "ifgm_si_bp":
+        #     return self.shape_invariant_ifgm_si_bp(points, target)
+        # elif self.attack_method == "ifgm_bp":
+        #     return self.ifgm_bp(points, target)
+        # elif self.attack_method == "geoa3":
+        #     return self.geoa3_attack(points, target)
+        # elif self.attack_method == "gsda":
+        #     return self.gsda_attack(points, target)
+        # elif self.attack_method == "gsda_bp":
+        #     return self.gsda_attack_bp(points, target)
+        # elif self.attack_method == "simba":
+        #     return self.simba_attack(points, target)
+        # elif self.attack_method == "simbapp":
+        #     return self.simbapp_attack(points, target)
+        # else:
+        #     NotImplementedError
 
     def get_defense_head(self, method):
         """Set the pre-processing based defense module.
@@ -378,11 +465,11 @@ class PointCloudAttack(object):
         Args:
             method (str): defense method name.
         """
-        if method == 'sor':
+        if method == "sor":
             pre_head = SORDefense(k=2, alpha=1.1)
-        elif method == 'srs':
+        elif method == "srs":
             pre_head = SRSDefense(drop_num=500)
-        elif method == 'dupnet':
+        elif method == "dupnet":
             pre_head = DUPNet(sor_k=2, sor_alpha=1.1, npoint=1024, up_ratio=4)
         else:
             raise NotImplementedError
@@ -417,9 +504,9 @@ class PointCloudAttack(object):
             target (torch.cuda.LongTensor): the label for points, [1].
         """
         normal_vec = points[:, :, -3:].detach()  # N, [1, N, 3]
-        normal_vec = normal_vec / \
-            torch.sqrt(torch.sum(normal_vec ** 2, dim=-
-                       1, keepdim=True))  # N, [1, N, 3]
+        normal_vec = normal_vec / torch.sqrt(
+            torch.sum(normal_vec**2, dim=-1, keepdim=True)
+        )  # N, [1, N, 3]
         points = points[:, :, :3].detach()  # P, [1, N, 3]
         ori_points = points.detach()
         clip_func = ClipPointsLinf(budget=self.eps)  # * np.sqrt(3*1024))
@@ -439,13 +526,13 @@ class PointCloudAttack(object):
 
                 # get white-box gradients
                 if not self.defense_method is None:
-                    logits = self.wb_classifier(
-                        self.pre_head(points.transpose(1, 2)))
+                    logits = self.wb_classifier(self.pre_head(points.transpose(1, 2)))
                 else:
                     logits = self.wb_classifier(points.transpose(1, 2))
 
-                loss = self.CWLoss(logits, target, kappa=0.,
-                                   tar=False, num_classes=self.num_class)
+                loss = self.CWLoss(
+                    logits, target, kappa=0.0, tar=False, num_classes=self.num_class
+                )
                 # logits = F.log_softmax(logits, dim=-1)
                 # loss = logits[:, target.item()]
                 self.wb_classifier.zero_grad()
@@ -454,26 +541,24 @@ class PointCloudAttack(object):
                 grad = points.grad.detach()
 
                 # L2
-                norm = torch.sum(grad ** 2, dim=[1, 2]) ** 0.5
+                norm = torch.sum(grad**2, dim=[1, 2]) ** 0.5
                 norm[norm == 0] = 1e-12
 
-                gamma = gamma_min + i / \
-                    (self.max_steps + 1) * (gamma_max - gamma_min)
+                gamma = gamma_min + i / (self.max_steps + 1) * (gamma_max - gamma_min)
 
-                points = points - gamma * self.step_size * \
-                    np.sqrt(3*1024) * grad / (norm[:, np.newaxis, np.newaxis])
+                points = points - gamma * self.step_size * np.sqrt(3 * 1024) * grad / (
+                    norm[:, np.newaxis, np.newaxis]
+                )
                 points = clip_func(points, ori_points)
 
                 if not self.defense_method is None:
-                    logits = self.wb_classifier(
-                        self.pre_head(points.transpose(1, 2)))
+                    logits = self.wb_classifier(self.pre_head(points.transpose(1, 2)))
                 else:
                     logits = self.wb_classifier(points.transpose(1, 2))
 
                 logits = logits.argmax(1).item()
 
-                delta, reg_loss = self.get_delta(
-                    points, ori_points, None, "l2")
+                delta, reg_loss = self.get_delta(points, ori_points, None, "l2")
                 output_points = points.detach()
                 output_reg = reg_loss.item()
 
@@ -484,12 +569,10 @@ class PointCloudAttack(object):
                 points = points.detach()
                 points.requires_grad = True
 
-                delta, reg_loss = self.get_delta(
-                    points, ori_points, None, "l2")
+                delta, reg_loss = self.get_delta(points, ori_points, None, "l2")
 
                 if not self.defense_method is None:
-                    logits = self.wb_classifier(
-                        self.pre_head(points.transpose(1, 2)))
+                    logits = self.wb_classifier(self.pre_head(points.transpose(1, 2)))
                 else:
                     logits = self.wb_classifier(points.transpose(1, 2))
 
@@ -500,16 +583,15 @@ class PointCloudAttack(object):
 
                 g = points.grad.detach()
 
-                g_norm = (g ** 2).sum((1, 2)).sqrt()
-                delta_norm = (delta ** 2).sum((1, 2)).sqrt()
+                g_norm = (g**2).sum((1, 2)).sqrt()
+                delta_norm = (delta**2).sum((1, 2)).sqrt()
                 g_norm[g_norm == 0] = 1e-12
                 delta_norm[delta_norm == 0] = 1e-12
                 g_hat = g / g_norm[:, None, None]
 
                 r = (delta * g_hat).sum((1, 2)) / delta_norm
 
-                gamma = gamma_min + i / \
-                    (self.max_steps + 1) * (gamma_max - gamma_min)
+                gamma = gamma_min + i / (self.max_steps + 1) * (gamma_max - gamma_min)
 
                 if logits.argmax(1).item() != target.item():
                     if reg_loss.item() < output_reg:
@@ -522,9 +604,12 @@ class PointCloudAttack(object):
                     yi_vstar_norm[yi_vstar_norm == 0] = 1e-9
 
                     tmp = (points - v_star) / yi_vstar_norm[:, None, None]
-                    tmp = tmp * \
-                        torch.sqrt(torch.max(torch.zeros_like(
-                            r), epsilon ** 2 - r ** 2))[:, None, None]
+                    tmp = (
+                        tmp
+                        * torch.sqrt(
+                            torch.max(torch.zeros_like(r), epsilon**2 - r**2)
+                        )[:, None, None]
+                    )
                     z = v_star + tmp
                     points = z.detach()
                     if torch.isnan(points).sum().item() != 0:
@@ -532,7 +617,7 @@ class PointCloudAttack(object):
 
                 else:
                     epsilon = delta_norm / gamma
-                    tmp = (r + torch.sqrt(epsilon ** 2 - delta_norm ** 2 + r ** 2))
+                    tmp = r + torch.sqrt(epsilon**2 - delta_norm**2 + r**2)
                     z = points - tmp[:, None, None] * g_hat
 
                     points = z.detach()
@@ -542,8 +627,7 @@ class PointCloudAttack(object):
         with torch.no_grad():
             adv_points = output_points.detach()
             if not self.defense_method is None:
-                adv_logits = self.classifier(
-                    self.pre_head(points.transpose(1, 2)))
+                adv_logits = self.classifier(self.pre_head(points.transpose(1, 2)))
             else:
                 adv_logits = self.classifier(points.transpose(1, 2))
             adv_target = adv_logits.argmax(1).item()
@@ -560,15 +644,16 @@ class PointCloudAttack(object):
 
     def geoa3_attack(self, points, target):
         data = points
-        data = (data[0][np.newaxis, :, 0:3], data[0]
-                [np.newaxis, :, 3:6], target)
+        data = (data[0][np.newaxis, :, 0:3], data[0][np.newaxis, :, 3:6], target)
         new_data = [None, None, None, None]
         new_data[0] = torch.zeros(
-            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2]))
+            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2])
+        )
         new_data[0][:, np.newaxis, :, :] = data[0]
 
         new_data[1] = torch.zeros(
-            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2]))
+            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2])
+        )
         new_data[1][:, np.newaxis, :, :] = data[1]
 
         new_data[2] = torch.zeros(size=(data[2].shape[0], 1))
@@ -579,8 +664,7 @@ class PointCloudAttack(object):
 
         for bs in range(new_data[0].shape[0]):
             target_labels = []
-            label_index = np.random.randint(
-                len(ten_label_indexes) - 1, size=1)[0]
+            label_index = np.random.randint(len(ten_label_indexes) - 1, size=1)[0]
             if ten_label_indexes[label_index] >= new_data[2][bs][0]:
                 label = ten_label_indexes[label_index + 1]
             else:
@@ -591,27 +675,40 @@ class PointCloudAttack(object):
             target_labels = torch.from_numpy(np.array(target_labels)).long()
             new_data[3][bs] = target_labels
 
-        data = (new_data[0].float().contiguous(), new_data[1].float(
-        ).contiguous(), new_data[2].long(), new_data[3].long())
+        data = (
+            new_data[0].float().contiguous(),
+            new_data[1].float().contiguous(),
+            new_data[2].long(),
+            new_data[3].long(),
+        )
         if not self.defense_method is None:
             defense = self.pre_head
         else:
             defense = None
-        adv_pc, targeted_label, attack_success_indicator, best_attack_step, loss, cd_loss, hd_loss, cur_loss = geoA3_attack.attack(
-            self.wb_classifier, defense, data, self.args)
+        (
+            adv_pc,
+            targeted_label,
+            attack_success_indicator,
+            best_attack_step,
+            loss,
+            cd_loss,
+            hd_loss,
+            cur_loss,
+        ) = geoA3_attack.attack(self.wb_classifier, defense, data, self.args)
         return adv_pc.permute(0, 2, 1), targeted_label, None
 
     def gsda_attack(self, points, target):
         data = points
-        data = (data[0][np.newaxis, :, 0:3], data[0]
-                [np.newaxis, :, 3:6], target)
+        data = (data[0][np.newaxis, :, 0:3], data[0][np.newaxis, :, 3:6], target)
         new_data = [None, None, None, None]
         new_data[0] = torch.zeros(
-            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2]))
+            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2])
+        )
         new_data[0][:, np.newaxis, :, :] = data[0]
 
         new_data[1] = torch.zeros(
-            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2]))
+            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2])
+        )
         new_data[1][:, np.newaxis, :, :] = data[1]
 
         new_data[2] = torch.zeros(size=(data[2].shape[0], 1))
@@ -622,8 +719,7 @@ class PointCloudAttack(object):
 
         for bs in range(new_data[0].shape[0]):
             target_labels = []
-            label_index = np.random.randint(
-                len(ten_label_indexes) - 1, size=1)[0]
+            label_index = np.random.randint(len(ten_label_indexes) - 1, size=1)[0]
             if ten_label_indexes[label_index] >= new_data[2][bs][0]:
                 label = ten_label_indexes[label_index + 1]
             else:
@@ -635,28 +731,34 @@ class PointCloudAttack(object):
             target_labels = torch.from_numpy(np.array(target_labels)).long()
             new_data[3][bs] = target_labels
 
-        data = (new_data[0].float().contiguous(), new_data[1].float(
-        ).contiguous(), new_data[2].long(), new_data[3].long())
+        data = (
+            new_data[0].float().contiguous(),
+            new_data[1].float().contiguous(),
+            new_data[2].long(),
+            new_data[3].long(),
+        )
         if not self.defense_method is None:
             defense = self.pre_head
         else:
             defense = None
-        adv_pc, targeted_label, attack_success_indicator, best_attack_step, loss = GSDA_attack.attack(
-            self.wb_classifier, defense, data, self.args)
+        adv_pc, targeted_label, attack_success_indicator, best_attack_step, loss = (
+            GSDA_attack.attack(self.wb_classifier, defense, data, self.args)
+        )
 
         return adv_pc.permute(0, 2, 1), targeted_label, None
 
     def gsda_attack_bp(self, points, target):
         data = points
-        data = (data[0][np.newaxis, :, 0:3], data[0]
-                [np.newaxis, :, 3:6], target)
+        data = (data[0][np.newaxis, :, 0:3], data[0][np.newaxis, :, 3:6], target)
         new_data = [None, None, None, None]
         new_data[0] = torch.zeros(
-            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2]))
+            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2])
+        )
         new_data[0][:, np.newaxis, :, :] = data[0]
 
         new_data[1] = torch.zeros(
-            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2]))
+            size=(data[0].shape[0], 1, data[0].shape[1], data[0].shape[2])
+        )
         new_data[1][:, np.newaxis, :, :] = data[1]
 
         new_data[2] = torch.zeros(size=(data[2].shape[0], 1))
@@ -667,8 +769,7 @@ class PointCloudAttack(object):
 
         for bs in range(new_data[0].shape[0]):
             target_labels = []
-            label_index = np.random.randint(
-                len(ten_label_indexes) - 1, size=1)[0]
+            label_index = np.random.randint(len(ten_label_indexes) - 1, size=1)[0]
             if ten_label_indexes[label_index] >= new_data[2][bs][0]:
                 label = ten_label_indexes[label_index + 1]
             else:
@@ -679,91 +780,25 @@ class PointCloudAttack(object):
             target_labels = torch.from_numpy(np.array(target_labels)).long()
             new_data[3][bs] = target_labels
 
-        data = (new_data[0].float().contiguous(), new_data[1].float(
-        ).contiguous(), new_data[2].long(), new_data[3].long())
+        data = (
+            new_data[0].float().contiguous(),
+            new_data[1].float().contiguous(),
+            new_data[2].long(),
+            new_data[3].long(),
+        )
         if not self.defense_method is None:
             defense = self.pre_head
         else:
             defense = None
-        adv_pc, targeted_label, attack_success_indicator, best_attack_step, loss = GSDA_attack.attack_bp(
-            self.wb_classifier, defense, data, self.args, self)
+        adv_pc, targeted_label, attack_success_indicator, best_attack_step, loss = (
+            GSDA_attack.attack_bp(self.wb_classifier, defense, data, self.args, self)
+        )
 
         return adv_pc, targeted_label, None
 
-    def shape_invariant_ifgm(self, points, target):
-        """Black-box I-FGSM based on shape-invariant sensitivity maps.
+    import line_profiler
 
-        Args:
-            points (torch.cuda.FloatTensor): the point cloud with N points, [1, N, 6].
-            target (torch.cuda.LongTensor): the label for points, [1].
-        """
-        normal_vec = points[:, :, -3:].data  # N, [1, N, 3]
-        normal_vec = normal_vec / \
-            torch.sqrt(torch.sum(normal_vec ** 2, dim=-
-                       1, keepdim=True))  # N, [1, N, 3]
-        points = points[:, :, :3].data  # P, [1, N, 3]
-        ori_points = points.data
-        clip_func = ClipPointsLinf(budget=self.eps)  # * np.sqrt(3*1024))
-
-        for i in range(self.max_steps):
-            # P -> P', detach()
-            new_points, spin_axis_matrix, translation_matrix = get_transformed_point_cloud(
-                points, normal_vec)
-            new_points = new_points.detach()
-
-            new_points.requires_grad = True
-            # P' -> P
-            points = get_original_point_cloud(
-                new_points, spin_axis_matrix, translation_matrix)
-            points = points.transpose(1, 2)  # P, [1, 3, N]
-            # get white-box gradients
-            if not self.defense_method is None:
-                logits = self.wb_classifier(self.pre_head(points))
-            else:
-                logits = self.wb_classifier(points)
-            loss = self.CWLoss(logits, target, kappa=0.,
-                               tar=False, num_classes=self.num_class)
-            self.wb_classifier.zero_grad()
-            loss.backward()
-            # print(loss.item(), logits.max(1)[1], target)
-            grad = new_points.grad.data  # g, [1, N, 3]
-            grad[:, :, 2] = 0.
-
-            # update P', P and N
-            # # Linf
-            # new_points = new_points - self.step_size * torch.sign(grad)
-            # L2
-            norm = torch.sum(grad ** 2, dim=[1, 2]) ** 0.5
-
-            new_points = new_points - self.step_size * \
-                np.sqrt(3*1024) * grad / (norm[:, None, None] + 1e-9)
-
-            points = get_original_point_cloud(
-                # P, [1, N, 3]
-                new_points, spin_axis_matrix, translation_matrix)
-            points = clip_func(points, ori_points)
-
-            normal_vec = get_normal_vector(points)  # N, [1, N, 3]
-
-        with torch.no_grad():
-            adv_points = points.data
-            if not self.defense_method is None:
-                adv_logits = self.classifier(
-                    self.pre_head(points.transpose(1, 2).detach()))
-            else:
-                adv_logits = self.classifier(points.transpose(1, 2).detach())
-            adv_target = adv_logits.data.max(1)[1]
-
-        if self.top5_attack:
-            target_top_5 = adv_logits.topk(5)[1]
-            if target in target_top_5:
-                adv_target = target
-            else:
-                adv_target = -1
-
-        del normal_vec, grad, new_points, spin_axis_matrix, translation_matrix
-        return adv_points, adv_target, (adv_logits.data.max(1)[1] != target).sum().item()
-
+    @line_profiler.profile
     def shape_invariant_ifgm_bp_mod2(self, points, target):
         """Black-box I-FGSM based on shape-invariant sensitivity maps.
 
@@ -772,9 +807,9 @@ class PointCloudAttack(object):
             target (torch.cuda.LongTensor): the label for points, [1].
         """
         normal_vec = points[:, :, -3:].data  # N, [1, N, 3]
-        normal_vec = normal_vec / \
-            torch.sqrt(torch.sum(normal_vec ** 2, dim=-
-                       1, keepdim=True))  # N, [1, N, 3]
+        normal_vec = normal_vec / torch.sqrt(
+            torch.sum(normal_vec**2, dim=-1, keepdim=True)
+        )  # N, [1, N, 3]
         points = points[:, :, :3].data  # P, [1, N, 3]
         ori_points = points.data
         clip_func = ClipPointsLinf(budget=self.eps)  # * np.sqrt(3*1024))
@@ -835,7 +870,8 @@ class PointCloudAttack(object):
                 bp_optims.append("cd")
 
             bp = boundary_projection_2(
-                self.args, weights=bp_weights, optim_seq=bp_optims)
+                self.args, weights=bp_weights, optim_seq=bp_optims
+            )
         elif self.bp_version == "bp2_si":
             bp_weights = []
             bp_optims = []
@@ -856,7 +892,8 @@ class PointCloudAttack(object):
                 bp_optims.append("cd")
 
             bp = boundary_projection_2_si(
-                self.args, weights=bp_weights, optim_seq=bp_optims)
+                self.args, weights=bp_weights, optim_seq=bp_optims
+            )
             si_grad_required = True
         elif self.bp_version == "bp1_si":
             bp = boundary_projection_1_si(self.args)
@@ -873,36 +910,43 @@ class PointCloudAttack(object):
 
             if not stage2:
                 # P -> P', detach()
-                new_points, spin_axis_matrix, translation_matrix = get_transformed_point_cloud(
-                    points, normal_vec)
+                new_points, spin_axis_matrix, translation_matrix = (
+                    get_transformed_point_cloud(points, normal_vec)
+                )
                 new_points = new_points.detach()
                 new_points.requires_grad = True
                 # P' -> P
                 points = get_original_point_cloud(
-                    new_points, spin_axis_matrix, translation_matrix)
+                    new_points, spin_axis_matrix, translation_matrix
+                )
                 points = points.transpose(1, 2)  # P, [1, 3, N]
                 # get white-box gradients
                 if not self.defense_method is None:
                     logits = self.wb_classifier(self.pre_head(points))
                 else:
                     logits = self.wb_classifier(points)
-                loss = self.CWLoss(logits, target, kappa=0.,
-                                   tar=False, num_classes=self.num_class)
+                loss = self.CWLoss(
+                    logits, target, kappa=0.0, tar=False, num_classes=self.num_class
+                )
                 self.wb_classifier.zero_grad()
                 loss.backward()
                 # print(loss.item(), logits.max(1)[1], target)
                 grad = new_points.grad.data  # g, [1, N, 3]
-                grad[:, :, 2] = 0.
+                grad[:, :, 2] = 0.0
                 # update P', P and N
                 # # Linf
                 # new_points = new_points - self.step_size * torch.sign(grad)
                 # L2
-                norm = torch.sum(grad ** 2, dim=[1, 2]) ** 0.5
-                new_points = new_points - self.step_size * \
-                    np.sqrt(3*1024) * grad / (norm[:, None, None] + 1e-9)
+                norm = torch.sum(grad**2, dim=[1, 2]) ** 0.5
+                new_points = new_points - self.step_size * np.sqrt(3 * 1024) * grad / (
+                    norm[:, None, None] + 1e-9
+                )
                 points = get_original_point_cloud(
                     # P, [1, N, 3]
-                    new_points, spin_axis_matrix, translation_matrix)
+                    new_points,
+                    spin_axis_matrix,
+                    translation_matrix,
+                )
                 points = clip_func(points, ori_points)
 
                 points = points.detach()
@@ -910,8 +954,7 @@ class PointCloudAttack(object):
                 normal_vec = get_normal_vector(points)  # N, [1, N, 3]
 
                 if not self.defense_method is None:
-                    logits = self.wb_classifier(
-                        self.pre_head(points.transpose(1, 2)))
+                    logits = self.wb_classifier(self.pre_head(points.transpose(1, 2)))
                 else:
                     logits = self.wb_classifier(points.transpose(1, 2))
 
@@ -933,7 +976,8 @@ class PointCloudAttack(object):
 
                 if self.curv_weight != 0.0:
                     reg_loss_curv = self.get_loss(
-                        points, ori_points, normal_vec, "curv")
+                        points, ori_points, normal_vec, "curv"
+                    )
                     reg_loss[:, 3] = reg_loss_curv
 
                 if logits != target.item() and (reg_loss <= output_reg).all():
@@ -949,7 +993,8 @@ class PointCloudAttack(object):
 
                     if not self.defense_method is None:
                         logits = self.wb_classifier(
-                            self.pre_head(points.transpose(1, 2)))
+                            self.pre_head(points.transpose(1, 2))
+                        )
                     else:
                         logits = self.wb_classifier(points.transpose(1, 2))
 
@@ -960,27 +1005,29 @@ class PointCloudAttack(object):
 
                     g = points.grad.detach()
 
-                    g_norm = (g ** 2).sum((1, 2)).sqrt()
+                    g_norm = (g**2).sum((1, 2)).sqrt()
                     g_norm[g_norm == 0] = 1e-12
                     g_hat = g / g_norm[:, None, None]
 
-                    points = bp(points, ori_points, normal_vec,
-                                g_hat, logits, target)
+                    points = bp(points, ori_points, normal_vec, g_hat, logits, target)
 
                     normal_vec = get_normal_vector(points)
 
                 else:
 
-                    new_points, spin_axis_matrix, translation_matrix = get_transformed_point_cloud(
-                        points, normal_vec)
+                    new_points, spin_axis_matrix, translation_matrix = (
+                        get_transformed_point_cloud(points, normal_vec)
+                    )
                     new_points = new_points.detach()
                     new_points.requires_grad = True
 
                     points = get_original_point_cloud(
-                        new_points, spin_axis_matrix, translation_matrix)
+                        new_points, spin_axis_matrix, translation_matrix
+                    )
                     if not self.defense_method is None:
                         logits = self.wb_classifier(
-                            self.pre_head(points.transpose(1, 2)))
+                            self.pre_head(points.transpose(1, 2))
+                        )
                     else:
                         logits = self.wb_classifier(points.transpose(1, 2))
 
@@ -990,19 +1037,27 @@ class PointCloudAttack(object):
                     loss.backward()
 
                     g = new_points.grad.detach().clone()
-                    g[:, :, 2] = 0.
+                    g[:, :, 2] = 0.0
 
                     new_points.grad.zero_()
 
-                    g_norm = (g ** 2).sum((1, 2)).sqrt()
+                    g_norm = (g**2).sum((1, 2)).sqrt()
                     g_norm[g_norm == 0] = 1e-12
                     g_hat = g / g_norm[:, None, None]
 
                     normal_vec = torch.zeros_like(normal_vec)
                     normal_vec[:, :, 2] = 1
 
-                    points = bp(new_points, spin_axis_matrix, translation_matrix,
-                                ori_points, normal_vec, g_hat, logits, target)
+                    points = bp(
+                        new_points,
+                        spin_axis_matrix,
+                        translation_matrix,
+                        ori_points,
+                        normal_vec,
+                        g_hat,
+                        logits,
+                        target,
+                    )
 
                     normal_vec = get_normal_vector(points)
 
@@ -1013,8 +1068,7 @@ class PointCloudAttack(object):
                 adv_points = points.clone()
 
             if not self.defense_method is None:
-                adv_logits = self.classifier(
-                    self.pre_head(adv_points.transpose(1, 2)))
+                adv_logits = self.classifier(self.pre_head(adv_points.transpose(1, 2)))
             else:
                 adv_logits = self.classifier(adv_points.transpose(1, 2))
             adv_target = adv_logits.argmax(-1)
@@ -1027,7 +1081,11 @@ class PointCloudAttack(object):
                 adv_target = -1
 
         del normal_vec, grad, new_points, spin_axis_matrix, translation_matrix
-        return adv_points, adv_target, (adv_logits.data.max(1)[1] != target).sum().item()
+        return (
+            adv_points,
+            adv_target,
+            (adv_logits.data.max(1)[1] != target).sum().item(),
+        )
 
     def shape_invariant_ifgm_si_bp(self, points, target):
         """Black-box I-FGSM based on shape-invariant sensitivity maps.
@@ -1037,9 +1095,9 @@ class PointCloudAttack(object):
             target (torch.cuda.LongTensor): the label for points, [1].
         """
         normal_vec = points[:, :, -3:].data  # N, [1, N, 3]
-        normal_vec = normal_vec / \
-            torch.sqrt(torch.sum(normal_vec ** 2, dim=-
-                       1, keepdim=True))  # N, [1, N, 3]
+        normal_vec = normal_vec / torch.sqrt(
+            torch.sum(normal_vec**2, dim=-1, keepdim=True)
+        )  # N, [1, N, 3]
         points = points[:, :, :3].data  # P, [1, N, 3]
         ori_points = points.data
         clip_func = ClipPointsLinf(budget=self.eps)  # * np.sqrt(3*1024))
@@ -1054,44 +1112,50 @@ class PointCloudAttack(object):
 
             if not stage2:
                 # P -> P', detach()
-                new_points, spin_axis_matrix, translation_matrix = get_transformed_point_cloud(
-                    points, normal_vec)
+                new_points, spin_axis_matrix, translation_matrix = (
+                    get_transformed_point_cloud(points, normal_vec)
+                )
                 new_points = new_points.detach()
                 new_points.requires_grad = True
                 # P' -> P
                 points = get_original_point_cloud(
-                    new_points, spin_axis_matrix, translation_matrix)
+                    new_points, spin_axis_matrix, translation_matrix
+                )
                 points = points.transpose(1, 2)  # P, [1, 3, N]
                 # get white-box gradients
                 if not self.defense_method is None:
                     logits = self.wb_classifier(self.pre_head(points))
                 else:
                     logits = self.wb_classifier(points)
-                loss = self.CWLoss(logits, target, kappa=0.,
-                                   tar=False, num_classes=self.num_class)
+                loss = self.CWLoss(
+                    logits, target, kappa=0.0, tar=False, num_classes=self.num_class
+                )
                 self.wb_classifier.zero_grad()
                 loss.backward()
                 # print(loss.item(), logits.max(1)[1], target)
                 grad = new_points.grad.data  # g, [1, N, 3]
-                grad[:, :, 2] = 0.
+                grad[:, :, 2] = 0.0
                 # update P', P and N
                 # # Linf
                 # new_points = new_points - self.step_size * torch.sign(grad)
                 # L2
-                norm = torch.sum(grad ** 2, dim=[1, 2]) ** 0.5
-                new_points = new_points - self.step_size * \
-                    np.sqrt(3*1024) * grad / (norm[:, None, None] + 1e-9)
+                norm = torch.sum(grad**2, dim=[1, 2]) ** 0.5
+                new_points = new_points - self.step_size * np.sqrt(3 * 1024) * grad / (
+                    norm[:, None, None] + 1e-9
+                )
                 points = get_original_point_cloud(
                     # P, [1, N, 3]
-                    new_points, spin_axis_matrix, translation_matrix)
+                    new_points,
+                    spin_axis_matrix,
+                    translation_matrix,
+                )
                 points = clip_func(points, ori_points)
 
                 points = points.detach()
 
                 normal_vec = get_normal_vector(points)  # N, [1, N, 3]
                 if not self.defense_method is None:
-                    logits = self.wb_classifier(
-                        self.pre_head(points.transpose(1, 2)))
+                    logits = self.wb_classifier(self.pre_head(points.transpose(1, 2)))
                 else:
                     logits = self.wb_classifier(points.transpose(1, 2))
 
@@ -1108,13 +1172,15 @@ class PointCloudAttack(object):
             else:
 
                 # P -> P'
-                new_points, spin_axis_matrix, translation_matrix = get_transformed_point_cloud(
-                    points, normal_vec)
+                new_points, spin_axis_matrix, translation_matrix = (
+                    get_transformed_point_cloud(points, normal_vec)
+                )
                 new_points = new_points.detach()
                 new_points.requires_grad = True
                 # P' -> P
                 points = get_original_point_cloud(
-                    new_points, spin_axis_matrix, translation_matrix)
+                    new_points, spin_axis_matrix, translation_matrix
+                )
 
                 new_ori_points = ori_points + translation_matrix
                 new_ori_points = new_ori_points.unsqueeze(-1)
@@ -1125,11 +1191,11 @@ class PointCloudAttack(object):
                 normal_vec[:, :, 2] = 1
 
                 delta, reg_loss = self.get_delta_si(
-                    points, spin_axis_matrix, translation_matrix, ori_points, None, "l2")
+                    points, spin_axis_matrix, translation_matrix, ori_points, None, "l2"
+                )
 
                 if not self.defense_method is None:
-                    logits = self.wb_classifier(
-                        self.pre_head(points.transpose(1, 2)))
+                    logits = self.wb_classifier(self.pre_head(points.transpose(1, 2)))
                 else:
                     logits = self.wb_classifier(points.transpose(1, 2))
 
@@ -1140,16 +1206,15 @@ class PointCloudAttack(object):
 
                 g = new_points.grad.detach()
 
-                g_norm = (g ** 2).sum((1, 2)).sqrt()
-                delta_norm = (delta ** 2).sum((1, 2)).sqrt()
+                g_norm = (g**2).sum((1, 2)).sqrt()
+                delta_norm = (delta**2).sum((1, 2)).sqrt()
                 g_norm[g_norm == 0] = 1e-12
                 delta_norm[delta_norm == 0] = 1e-12
                 g_hat = g / g_norm[:, None, None]
 
                 r = (delta * g_hat).sum((1, 2)) / delta_norm
 
-                gamma = gamma_min + i / \
-                    (self.max_steps + 1) * (gamma_max - gamma_min)
+                gamma = gamma_min + i / (self.max_steps + 1) * (gamma_max - gamma_min)
 
                 if logits.argmax(1).item() != target.item():
                     if reg_loss.item() < output_reg:
@@ -1158,14 +1223,16 @@ class PointCloudAttack(object):
 
                     epsilon = gamma * delta_norm
                     v_star = new_ori_points + r[:, None, None] * g_hat
-                    yi_vstar_norm = ((new_points - v_star)
-                                     ** 2).sum((1, 2)).sqrt()
+                    yi_vstar_norm = ((new_points - v_star) ** 2).sum((1, 2)).sqrt()
                     yi_vstar_norm[yi_vstar_norm == 0] = 1e-9
 
                     tmp = (new_points - v_star) / yi_vstar_norm[:, None, None]
-                    tmp = tmp * \
-                        torch.sqrt(torch.max(torch.zeros_like(
-                            r), epsilon ** 2 - r ** 2))[:, None, None]
+                    tmp = (
+                        tmp
+                        * torch.sqrt(
+                            torch.max(torch.zeros_like(r), epsilon**2 - r**2)
+                        )[:, None, None]
+                    )
                     z = v_star + tmp
                     new_points = z.detach()
                     if torch.isnan(new_points).sum().item() != 0:
@@ -1173,7 +1240,7 @@ class PointCloudAttack(object):
 
                 else:
                     epsilon = delta_norm / gamma
-                    tmp = (r + torch.sqrt(epsilon ** 2 - delta_norm ** 2 + r ** 2))
+                    tmp = r + torch.sqrt(epsilon**2 - delta_norm**2 + r**2)
                     z = new_points - tmp[:, None, None] * g_hat
 
                     new_points = z.detach()
@@ -1181,14 +1248,14 @@ class PointCloudAttack(object):
                         assert False, "In NAN Occured!!!"
 
                 points = get_original_point_cloud(
-                    new_points, spin_axis_matrix, translation_matrix)
+                    new_points, spin_axis_matrix, translation_matrix
+                )
                 normal_vec = get_normal_vector(points)
 
         with torch.no_grad():
             adv_points = output_points.data
             if not self.defense_method is None:
-                adv_logits = self.classifier(
-                    self.pre_head(adv_points.transpose(1, 2)))
+                adv_logits = self.classifier(self.pre_head(adv_points.transpose(1, 2)))
             else:
                 adv_logits = self.classifier(adv_points.transpose(1, 2))
             adv_target = adv_logits.argmax(-1)
@@ -1201,7 +1268,11 @@ class PointCloudAttack(object):
                 adv_target = -1
 
         del normal_vec, grad, new_points, spin_axis_matrix, translation_matrix
-        return adv_points, adv_target, (adv_logits.data.max(1)[1] != target).sum().item()
+        return (
+            adv_points,
+            adv_target,
+            (adv_logits.data.max(1)[1] != target).sum().item(),
+        )
 
     def shape_invariant_query_attack(self, points, target):
         """Blaxk-box query-based attack based on point-cloud sensitivity maps.
@@ -1211,9 +1282,9 @@ class PointCloudAttack(object):
             target (torch.cuda.LongTensor): the label for points, [1].
         """
         normal_vec = points[:, :, -3:].data  # N, [1, N, 3]
-        normal_vec = normal_vec / \
-            torch.sqrt(torch.sum(normal_vec ** 2, dim=-
-                       1, keepdim=True))  # N, [1, N, 3]
+        normal_vec = normal_vec / torch.sqrt(
+            torch.sum(normal_vec**2, dim=-1, keepdim=True)
+        )  # N, [1, N, 3]
         points = points[:, :, :3].data  # P, [1, N, 3]
         ori_points = points.data
         # initialization
@@ -1239,42 +1310,45 @@ class PointCloudAttack(object):
         # P -> P', detach()
         points = points.transpose(1, 2)
         new_points, spin_axis_matrix, translation_matrix = get_transformed_point_cloud(
-            points.detach(), normal_vec)
+            points.detach(), normal_vec
+        )
         new_points = new_points.detach()
         new_points.requires_grad = True
 
         # P' -> P
         inputs = get_original_point_cloud(
-            new_points, spin_axis_matrix, translation_matrix)
-        inputs = torch.min(torch.max(inputs, ori_points -
-                           self.eps), ori_points + self.eps)
+            new_points, spin_axis_matrix, translation_matrix
+        )
+        inputs = torch.min(
+            torch.max(inputs, ori_points - self.eps), ori_points + self.eps
+        )
         inputs = inputs.transpose(1, 2)  # P, [1, 3, N]
 
         # get white-box gradients
         logits = self.wb_classifier(inputs)
-        loss = self.CWLoss(logits, target, kappa=-999.,
-                           tar=True, num_classes=self.num_class)
+        loss = self.CWLoss(
+            logits, target, kappa=-999.0, tar=True, num_classes=self.num_class
+        )
         self.wb_classifier.zero_grad()
         loss.backward()
 
         grad = new_points.grad.data  # g, [1, N, 3]
-        grad[:, :, 2] = 0.
+        grad[:, :, 2] = 0.0
         new_points.requires_grad = False
         # \sqrt{g_{x'}^2+g_{y'}^2}, [1, N]
         rankings = torch.sqrt(grad[:, :, 0] ** 2 + grad[:, :, 1] ** 2)
         # (g_{x'}/r,g_{y'}/r,0), [1, N, 3]
-        directions = grad / (rankings.unsqueeze(-1)+1e-16)
+        directions = grad / (rankings.unsqueeze(-1) + 1e-16)
 
         # rank the sensitivity map in the desending order
         point_list = []
         for i in range(points.size(1)):
             point_list.append((i, directions[:, i, :], rankings[:, i].item()))
-        sorted_point_list = sorted(
-            point_list, key=lambda c: c[2], reverse=True)
+        sorted_point_list = sorted(point_list, key=lambda c: c[2], reverse=True)
 
         # query loop
         i = 0
-        best_loss = -999.
+        best_loss = -999.0
         while best_loss < 0 and i < len(sorted_point_list):
             # print(i, len(sorted_point_list))
             idx, direction, _ = sorted_point_list[i]
@@ -1284,22 +1358,22 @@ class PointCloudAttack(object):
                 inputs = new_points + pert
                 # U^T P', [1, N, 3, 1]
                 inputs = torch.matmul(
-                    spin_axis_matrix.transpose(-1, -2), inputs.unsqueeze(-1))
+                    spin_axis_matrix.transpose(-1, -2), inputs.unsqueeze(-1)
+                )
                 # P = U^T P' - (P \cdot N) N, [1, N, 3, 1]
                 inputs = inputs - translation_matrix.unsqueeze(-1)
                 inputs = inputs.squeeze(-1).transpose(1, 2)  # P, [1, 3, N]
                 # inputs = torch.clamp(inputs, -1, 1)
                 with torch.no_grad():
                     if not self.defense_method is None:
-                        logits = self.classifier(
-                            self.pre_head(inputs.detach()))
+                        logits = self.classifier(self.pre_head(inputs.detach()))
                     else:
-                        logits = self.classifier(
-                            inputs.detach())  # [1, num_class]
+                        logits = self.classifier(inputs.detach())  # [1, num_class]
                     query_costs += 1
 
-                loss = self.CWLoss(logits, target, kappa=-
-                                   999., tar=True, num_classes=self.num_class)
+                loss = self.CWLoss(
+                    logits, target, kappa=-999.0, tar=True, num_classes=self.num_class
+                )
                 if loss.item() > best_loss:
                     # print(loss.item())
                     best_loss = loss.item()
@@ -1327,9 +1401,9 @@ class PointCloudAttack(object):
             target (torch.cuda.LongTensor): the label for points, [1].
         """
         normal_vec = points[:, :, -3:].data  # N, [1, N, 3]
-        normal_vec = normal_vec / \
-            torch.sqrt(torch.sum(normal_vec ** 2, dim=-
-                       1, keepdim=True))  # N, [1, N, 3]
+        normal_vec = normal_vec / torch.sqrt(
+            torch.sum(normal_vec**2, dim=-1, keepdim=True)
+        )  # N, [1, N, 3]
         points = points[:, :, :3].data  # P, [1, N, 3]
         ori_points = points.data
         result_points = points.clone()
@@ -1370,45 +1444,54 @@ class PointCloudAttack(object):
         # P -> P', detach()
         points = points.transpose(1, 2)
         new_points, spin_axis_matrix, translation_matrix = get_transformed_point_cloud(
-            points.detach(), normal_vec)
+            points.detach(), normal_vec
+        )
         new_points = new_points.detach()
         new_points.requires_grad = True
 
         # P' -> P
         inputs = get_original_point_cloud(
-            new_points, spin_axis_matrix, translation_matrix)
-        inputs = torch.min(torch.max(inputs, ori_points -
-                           self.eps), ori_points + self.eps)
+            new_points, spin_axis_matrix, translation_matrix
+        )
+        inputs = torch.min(
+            torch.max(inputs, ori_points - self.eps), ori_points + self.eps
+        )
         inputs = inputs.transpose(1, 2)  # P, [1, 3, N]
 
         # get white-box gradients
         logits = self.wb_classifier(inputs)
-        loss = self.CWLoss(logits, target, kappa=-999.,
-                           tar=True, num_classes=self.num_class)
+        loss = self.CWLoss(
+            logits, target, kappa=-999.0, tar=True, num_classes=self.num_class
+        )
         self.wb_classifier.zero_grad()
         loss.backward()
 
         grad = new_points.grad.data  # g, [1, N, 3]
-        grad[:, :, 2] = 0.
+        grad[:, :, 2] = 0.0
 
         # \sqrt{g_{x'}^2+g_{y'}^2}, [1, N]
         rankings = torch.sqrt(grad[:, :, 0] ** 2 + grad[:, :, 1] ** 2)
         # (g_{x'}/r,g_{y'}/r,0), [1, N, 3]
-        directions = grad / (rankings.unsqueeze(-1)+1e-16)
+        directions = grad / (rankings.unsqueeze(-1) + 1e-16)
         alpha_hat = bp.gradient_map_project(
-            new_points, spin_axis_matrix, translation_matrix, ori_points, normal_vec, directions)
+            new_points,
+            spin_axis_matrix,
+            translation_matrix,
+            ori_points,
+            normal_vec,
+            directions,
+        )
 
         new_points.requires_grad = False
         # rank the sensitivity map in the desending order
         point_list = []
         for i in range(points.size(1)):
             point_list.append((i, directions[:, i, :], rankings[:, i].item()))
-        sorted_point_list = sorted(
-            point_list, key=lambda c: c[2], reverse=True)
+        sorted_point_list = sorted(point_list, key=lambda c: c[2], reverse=True)
 
         # query loop
         i = 0
-        best_loss = -999.
+        best_loss = -999.0
         while best_loss < 0 and i < len(sorted_point_list):
             idx, direction, _ = sorted_point_list[i]
             for eps in {self.step_size, -self.step_size}:
@@ -1417,24 +1500,30 @@ class PointCloudAttack(object):
                 inputs = new_points + pert
                 # U^T P', [1, N, 3, 1]
                 inputs = torch.matmul(
-                    spin_axis_matrix.transpose(-1, -2), inputs.unsqueeze(-1))
+                    spin_axis_matrix.transpose(-1, -2), inputs.unsqueeze(-1)
+                )
                 # P = U^T P' - (P \cdot N) N, [1, N, 3, 1]
                 inputs = inputs - translation_matrix.unsqueeze(-1)
                 inputs = inputs.squeeze(-1).transpose(1, 2)  # P, [1, 3, N]
                 # inputs = torch.clamp(inputs, -1, 1)
                 with torch.no_grad():
                     if not self.defense_method is None:
-                        logits = self.classifier(
-                            self.pre_head(inputs.detach()))
+                        logits = self.classifier(self.pre_head(inputs.detach()))
                     else:
-                        logits = self.classifier(
-                            inputs.detach())  # [1, num_class]
+                        logits = self.classifier(inputs.detach())  # [1, num_class]
                     query_costs += 1
-                loss = self.CWLoss(logits, target, kappa=-
-                                   999., tar=True, num_classes=self.num_class)
+                loss = self.CWLoss(
+                    logits, target, kappa=-999.0, tar=True, num_classes=self.num_class
+                )
                 if loss.item() > best_loss:
                     alpha_hat = bp.gradient_map_project(
-                        new_points, spin_axis_matrix, translation_matrix, ori_points, normal_vec, directions)
+                        new_points,
+                        spin_axis_matrix,
+                        translation_matrix,
+                        ori_points,
+                        normal_vec,
+                        directions,
+                    )
                     pert[:, idx, :] -= 0.16 * alpha_hat[:, idx, :]
                     best_loss = loss.item()
                     new_points = new_points + pert
@@ -1493,7 +1582,7 @@ class PointCloudAttack(object):
 
         # query loop
         i = 0
-        best_loss = -999.
+        best_loss = -999.0
         while best_loss < 0 and i < len(basis_list):
             channel, idx = basis_list[i]
             for eps in {self.step_size, -self.step_size}:
@@ -1502,14 +1591,13 @@ class PointCloudAttack(object):
                 inputs = points + pert
                 with torch.no_grad():
                     if not self.defense_method is None:
-                        logits = self.classifier(
-                            self.pre_head(inputs.detach()))
+                        logits = self.classifier(self.pre_head(inputs.detach()))
                     else:
-                        logits = self.classifier(
-                            inputs.detach())  # [1, num_class]
+                        logits = self.classifier(inputs.detach())  # [1, num_class]
                     query_costs += 1
-                loss = self.CWLoss(logits, target, kappa=-
-                                   999., tar=True, num_classes=self.num_class)
+                loss = self.CWLoss(
+                    logits, target, kappa=-999.0, tar=True, num_classes=self.num_class
+                )
                 if loss.item() > best_loss:
                     # print(loss.item())
                     best_loss = loss.item()
@@ -1561,8 +1649,9 @@ class PointCloudAttack(object):
         points = points.detach()
         points.requires_grad = True
         logits = self.wb_classifier(points)
-        loss = self.CWLoss(logits, target, kappa=-999.,
-                           tar=True, num_classes=self.num_class)
+        loss = self.CWLoss(
+            logits, target, kappa=-999.0, tar=True, num_classes=self.num_class
+        )
         self.wb_classifier.zero_grad()
         loss.backward()
         grad = points.grad.data  # g, [1, 3, N]
@@ -1577,7 +1666,7 @@ class PointCloudAttack(object):
 
         # query loop
         i = 0
-        best_loss = -999.
+        best_loss = -999.0
         while best_loss < 0 and i < grad.shape[0]:
             # channel, idx, _ = sorted_basis_list[i]
             m = Categorical(grad)
@@ -1586,18 +1675,17 @@ class PointCloudAttack(object):
             idx = int(choice // 3)
             for eps in {self.step_size, -self.step_size}:
                 pert = torch.zeros_like(points).cuda()  # \delta, [1, 3, N]
-                pert[:, channel, idx] += (eps + 0.1*torch.randn(1).cuda())
+                pert[:, channel, idx] += eps + 0.1 * torch.randn(1).cuda()
                 inputs = points + pert
                 with torch.no_grad():
                     if not self.defense_method is None:
-                        logits = self.classifier(
-                            self.pre_head(inputs.detach()))
+                        logits = self.classifier(self.pre_head(inputs.detach()))
                     else:
-                        logits = self.classifier(
-                            inputs.detach())  # [1, num_class]
+                        logits = self.classifier(inputs.detach())  # [1, num_class]
                     query_costs += 1
-                loss = self.CWLoss(logits, target, kappa=-
-                                   999., tar=True, num_classes=self.num_class)
+                loss = self.CWLoss(
+                    logits, target, kappa=-999.0, tar=True, num_classes=self.num_class
+                )
                 if loss.item() > best_loss:
                     # print(loss.item())
                     best_loss = loss.item()
