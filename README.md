@@ -14,6 +14,10 @@ conda env create -f environment.yml
 
 b. We use the same model from paper *Shape-invariant 3D Adversarial Point Clouds (CVPR 2022)*, download checkpoints from [https://drive.google.com/file/d/1L25i0l6L_b1Vw504WQR8-Z0oh2FJA0G9/view]() and set it properly in `./checkpoint/`:
 
+## Changelogs
+
+[2025.5.10] Mini-batch attack added.
+
 c. start eidos attack:
 
 ```shell

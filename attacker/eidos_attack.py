@@ -205,6 +205,8 @@ class eidos_attack(nn.Module):
 
                 logits = logits.argmax(-1)
                 stage2 = (logits != target).all()
+                if stage2:
+                    print(i)
 
             else:
                 points = points.detach()
@@ -212,8 +214,7 @@ class eidos_attack(nn.Module):
 
                 logits = self.classifier(self.pre_head(points.transpose(1, 2)))
 
-                logits = F.log_softmax(logits, dim=-1)
-                loss = logits.gather(dim=1, index=target.unsqueeze(1)).sum()
+                loss = logits.log_softmax(dim=-1).gather(dim=1, index=target.unsqueeze(1)).sum()
                 self.classifier.zero_grad()
                 loss.backward()
 

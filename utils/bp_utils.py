@@ -435,6 +435,9 @@ class boundary_projection_3(boundary_projectuion):
         
         if self.output_points is None:
             self.output_points = points
+            # assert update_mask.all()
+            # print(in_out_mask)
+            # print(update_mask)
         
         self.output_points = torch.where(
             update_mask[:, None, None],

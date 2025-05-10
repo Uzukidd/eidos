@@ -268,7 +268,7 @@ class PointCloudAttack(object):
 
         if self.args.target_model == "point_transformer":
             classifier = self.build_models_aux()
-        elif self.args.surrogate_model == "pointllm_bert":
+        elif self.args.target_model == "pointllm_bert":
             classifier = pointbert_cls.create_pointbert_cls(
                 "model/classifier/pointbert/PointTransformer_8192point_2layer.yaml",
                 None,

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import line_profiler
 import argparse
 import os
 import pickle as pkl
@@ -55,14 +56,11 @@ ten_label_indexes = {
 }
 
 
-def load_partial_modelnet40_dataset(data_path: str, batch_size:int):
+def load_partial_modelnet40_dataset(data_path: str):
     class partial_modelnet40_dataset(Dataset):
         def __init__(self, pkl_file):
             with open(pkl_file, "rb") as f:
                 self.data = pkl.load(f)  # list of (points, label)
-
-            # 可选：将所有数据转换为 Tensor（如果你不希望延迟到 __getitem__）
-            # self.data = [(torch.tensor(p, dtype=torch.float32), torch.tensor(l)) for p, l in self.data]
 
         def __len__(self):
             return len(self.data)
@@ -77,11 +75,12 @@ def load_partial_modelnet40_dataset(data_path: str, batch_size:int):
             return points, label
 
     dataset = partial_modelnet40_dataset(data_path)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=64)
-    return dataset, dataloader
+    # dataloader = DataLoader(dataset, batch_size=batch_size,
+    #                         shuffle=False, num_workers=64)
+    return dataset
 
 
-def load_modelnet40_dataset(data_path: str, batch_size:int):
+def load_modelnet40_dataset(data_path: str):
     # TRAIN_DATASET = ModelNetDataset(
     #     root=data_path, npoint=8192, split="train", normal_channel=False
     # )
@@ -90,18 +89,14 @@ def load_modelnet40_dataset(data_path: str, batch_size:int):
     #     TRAIN_DATASET, batch_size=batch_size, shuffle=True, num_workers=64
     # )
 
-    TEST_DATASET = Subset(
-        ModelNetDataset(root=data_path, npoint=8192, split="test", normal_channel=True)
-    )
+    TEST_DATASET = ModelNetDataset(root=data_path, npoint=8192,
+                                   split="test", normal_channel=True)
 
-    test_dataLoader = DataLoader(
-        TEST_DATASET, batch_size=batch_size, shuffle=False, num_workers=64
-    )
+    # test_dataLoader = DataLoader(
+    #     TEST_DATASET, batch_size=batch_size, shuffle=False, num_workers=64
+    # )
 
-    return TEST_DATASET, test_dataLoader
-
-
-import line_profiler
+    return TEST_DATASET
 
 
 @line_profiler.profile
@@ -125,9 +120,11 @@ def main():
     recall = []
 
     if args.dataset == "ModelNet40":
-        datas, test_dataLoader = load_partial_modelnet40_dataset(args.data_path, args.batch_size)
+        dataset = load_partial_modelnet40_dataset(
+            args.data_path)
     elif args.dataset == "ModelNet40Full":
-        datas, test_dataLoader = load_modelnet40_dataset(args.data_path, args.batch_size)
+        dataset = load_modelnet40_dataset(
+            args.data_path)
 
     collector = metric_collector()
     collector.register(ASR_metric(attack.classifier))
@@ -145,19 +142,16 @@ def main():
 
     query_costs = []
 
-    max_len = len(datas)
     if args.time_verify or args.ss_exp:
-        if args.dataset != "ModelNet40Full":
-            datas = datas[::10]
-            max_len = len(datas)
-        else:
-            max_len = 20
+        dataset = Subset(dataset, range(100))
+
+    dataloader = DataLoader(
+        dataset, batch_size=args.batch_size, shuffle=False, num_workers=64
+    )
 
     for batch_id, data in tqdm(
-        enumerate(test_dataLoader), total=test_dataLoader.__len__()
+        enumerate(dataloader), total=dataloader.__len__()
     ):
-        if batch_id == max_len:
-            break
 
         points, target = data_preprocess(data)
         target = target.long()
@@ -168,6 +162,8 @@ def main():
 
         with torch.no_grad():
             recall = target == attack.predict(points)
+
+        points, target = points[recall], target[recall]
 
         # start attack
         t0 = time.time()
@@ -181,9 +177,9 @@ def main():
 
         result.append((adv_points.cpu().numpy(), adv_target.cpu().numpy()))
 
-        pc_normal = points[recall, :, -3:]
-        pc_ori = points[recall, :, 0:3]
-        pc_adv = adv_points[recall, :, :]
+        pc_normal = points[:, :, -3:]
+        pc_ori = points[:, :, 0:3]
+        pc_adv = adv_points[:, :, :]
         collector.update(pc_adv, pc_ori, pc_normal)
 
     print(collector.output_str())
@@ -196,12 +192,12 @@ def main():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Shape-invariant 3D Adversarial Point Clouds"
+        description="Eidos 3D Adversarial Point Clouds"
     )
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=8,
+        default=16,
         metavar="N",
         help="input batch size for training (default: 1)",
     )
@@ -256,7 +252,8 @@ if __name__ == "__main__":
         "--query_attack_method",
         type=str,
         default=None,
-        choices=["ifgm_si_adv_query", "ifgm_bp_ours_query", "simbapp", "simba"],
+        choices=["ifgm_si_adv_query",
+                 "ifgm_bp_ours_query", "simbapp", "simba"],
     )
     parser.add_argument(
         "--surrogate_model",
@@ -332,8 +329,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--step_size", default=0.007, type=float, help="step-size of perturbation"
     )
-    parser.add_argument("--device", default=0, type=int, help="specific device")
-    parser.add_argument("--task_name", default=None, type=str, help="specific device")
+    parser.add_argument("--device", default=0, type=int,
+                        help="specific device")
+    parser.add_argument("--task_name", default=None,
+                        type=str, help="specific device")
     # parser.add_argument("--rank", type=int, default=0, help="")
     # parser.add_argument("--rank_count", type=int, default=1000, help="")
 
@@ -385,7 +384,8 @@ if __name__ == "__main__":
         metavar="M",
         help="For GEOA3 max steps",
     )
-    parser.add_argument("--optim", default="adam", type=str, help="For GEOA3 adam| sgd")
+    parser.add_argument("--optim", default="adam",
+                        type=str, help="For GEOA3 adam| sgd")
     parser.add_argument("--lr", type=float, default=0.010, help="For GEOA3 ")
     parser.add_argument(
         "--cls_loss_type", default="CE", type=str, help="For GEOA3 Margin | CE"
@@ -393,8 +393,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dis_loss_type", default="CD", type=str, help="For GEOA3 CD | L2 | None"
     )
-    parser.add_argument("--dis_loss_weight", type=float, default=1.0, help="For GEOA3 ")
-    parser.add_argument("--hd_loss_weight", type=float, default=0.1, help="For GEOA3 ")
+    parser.add_argument("--dis_loss_weight", type=float,
+                        default=1.0, help="For GEOA3 ")
+    parser.add_argument("--hd_loss_weight", type=float,
+                        default=0.1, help="For GEOA3 ")
     parser.add_argument(
         "--is_use_lr_scheduler",
         dest="is_use_lr_scheduler",
@@ -444,7 +446,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--is_cd_single_side", action="store_true", default=False, help=""
     )
-    parser.add_argument("--uniform_loss_weight", type=float, default=0.0, help="")
+    parser.add_argument("--uniform_loss_weight",
+                        type=float, default=0.0, help="")
 
     args = parser.parse_args()
 

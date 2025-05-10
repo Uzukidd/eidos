@@ -14,6 +14,7 @@ from utils.loss_utils import (
     pseudo_chamfer_loss,
 )
 
+from typing import Optional
 
 class metric(ABC):
     def __init__(self, name: str):
@@ -138,7 +139,7 @@ class metric_collector:
         self.metrics.append(metric_obj)
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, recall_mask: Optional[torch.Tensor] = None
     ):
         with torch.no_grad():
             for m in self.metrics:
