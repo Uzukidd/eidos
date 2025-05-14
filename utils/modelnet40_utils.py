@@ -47,6 +47,7 @@ class ModelNetDataset(Dataset):
 
         self.cat = [line.rstrip() for line in open(self.catfile)]
         self.classes = dict(zip(self.cat, range(len(self.cat))))
+        self.idx_to_classes = dict(zip(range(len(self.cat)), self.cat))
         self.normal_channel = normal_channel
 
         shape_ids = {}

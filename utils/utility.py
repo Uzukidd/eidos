@@ -148,12 +148,6 @@ def estimate_perpendicular(pc, k, sigma=0.01, clip=0.05):
 
     return torch.clamp(perpendi_vector_1*aux_vector1, -1*clip, clip) + torch.clamp(perpendi_vector_2*aux_vector2, -1*clip, clip)
 
-def _compare(output, target, gt, targeted):
-    if targeted:
-        return output == target
-    else:
-        return output != gt
-
 def farthest_points_normalized_single_numpy(obj_points, num_points):
     first = np.random.randint(len(obj_points))
     selected = [first]
@@ -169,20 +163,6 @@ def farthest_points_normalized_single_numpy(obj_points, num_points):
     res_points = res_points - avg[np.newaxis, :]
     dists = np.max(np.linalg.norm(res_points, axis = 1), axis = 0)
     res_points = res_points / dists
-
-    return res_points
-
-def farthest_points_sample(obj_points, num_points):
-    assert obj_points.size(1) == 3
-    b,_,n = obj_points.size()
-
-    selected = torch.randint(obj_points.size(2), [obj_points.size(0),1]).cuda()
-    dists = torch.full([obj_points.size(0), obj_points.size(2)], fill_value = np.inf).cuda()
-
-    for _ in range(num_points - 1):
-        dists = torch.min(dists, torch.norm(obj_points - torch.gather(obj_points, 2, selected[:,-1].unsqueeze(1).unsqueeze(2).expand(b,3,1)), dim = 1))
-        selected = torch.cat([selected, torch.argmax(dists, dim=1, keepdim=True)], dim = 1)
-    res_points = torch.gather(obj_points, 2, selected.unsqueeze(1).expand(b, 3, num_points))
 
     return res_points
 
