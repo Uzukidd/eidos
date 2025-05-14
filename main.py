@@ -126,7 +126,7 @@ def main():
             args.data_path)
 
     collector = metric_collector()
-    collector.register(ASR_metric(attack.classifier))
+    collector.register(ASR_metric(attack.classifier, attack.pre_head))
     collector.register(L2_metric())
     collector.register(HD_metric())
     collector.register(DoubleHD_metric())
@@ -182,7 +182,7 @@ def main():
         pc_normal = points[:, :, -3:]
         pc_ori = points[:, :, 0:3]
         pc_adv = adv_points[:, :, :]
-        collector.update(pc_adv, pc_ori, pc_normal)
+        collector.update(pc_adv, pc_ori, pc_normal, target)
 
     if args.save_to_file:
         num = 0

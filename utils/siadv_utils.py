@@ -6,16 +6,17 @@ def get_original_point_cloud(new_points, spin_axis_matrix, translation_matrix):
     """Calculate the spin-axis matrix.
 
     Args:
-        new_points (torch.cuda.FloatTensor): the transformed point cloud with N points, [1, N, 3].
-        spin_axis_matrix (torch.cuda.FloatTensor): the rotate matrix for transformation, [1, N, 3, 3].
-        translation_matrix (torch.cuda.FloatTensor): the offset matrix for transformation, [1, N, 3, 3].
+        new_points (torch.cuda.FloatTensor): the transformed point cloud with N points, [B, N, 3].
+        spin_axis_matrix (torch.cuda.FloatTensor): the rotate matrix for transformation, [B, N, 3, 3].
+        translation_matrix (torch.cuda.FloatTensor): the offset matrix for transformation, [B, N, 3, 1].
     """
     inputs = torch.matmul(
         spin_axis_matrix.transpose(-1, -2), new_points.unsqueeze(-1)
-    )  # U^T P', [1, N, 3, 1]
+    )  # U^T P', [B, N, 3, 1]
+
     inputs = inputs - translation_matrix.unsqueeze(
         -1
-    )  # P = U^T P' - (P \cdot N) N, [1, N, 3, 1]
+    )  # P = U^T P' - (P \cdot N) N, [B, N, 3, 1]
     inputs = inputs.squeeze(-1)  # P, [1, N, 3]
     return inputs
 

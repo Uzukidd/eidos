@@ -544,16 +544,10 @@ class PointCloudAttack(object):
         points = points.contiguous()
         with torch.no_grad():
             points = points.transpose(1, 2)  # P, [1, 3, N]
-            if not self.defense_method is None:
-                if not self.args.query_attack_method is None:
-                    logits = self.classifier(self.pre_head(points))
-                else:
-                    logits = self.wb_classifier(self.pre_head(points))
+            if self.args.query_attack_method is not None:
+                logits = self.classifier(self.pre_head(points))
             else:
-                if not self.args.query_attack_method is None:
-                    logits = self.classifier(points)
-                else:
-                    logits = self.wb_classifier(points)
+                logits = self.wb_classifier(self.pre_head(points))
 
             logits = logits.argmax(1)
 

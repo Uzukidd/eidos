@@ -16,6 +16,7 @@ from utils.loss_utils import (
 
 from typing import Optional
 
+
 class metric(ABC):
     def __init__(self, name: str):
         self.name = name
@@ -23,7 +24,7 @@ class metric(ABC):
 
     @abstractmethod
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, label: torch.Tensor
     ):
         raise NotImplementedError
 
@@ -37,16 +38,17 @@ class metric(ABC):
 
 class ASR_metric(metric):
 
-    def __init__(self, cls_model: nn.Module):
+    def __init__(self, cls_model: nn.Module, pre_head: nn.Module):
         super().__init__("ASR")
         self.cls_model = cls_model
+        self.pre_head = pre_head
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, label: torch.Tensor
     ):
-        asr = self.cls_model(pc_adv.transpose(1, 2)).argmax(-1) != self.cls_model(
-            pc_ori.transpose(1, 2)
-        ).argmax(-1)
+        asr = self.cls_model(self.pre_head(pc_adv.transpose(1, 2))).argmax(
+            -1
+        ) != label
         self.batch_metric.append(asr.float())
 
 
@@ -56,7 +58,7 @@ class L2_metric(metric):
         super().__init__("L2 norm")
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, label: torch.Tensor
     ):
         l2 = norm_l2_loss(pc_adv, pc_ori)
         self.batch_metric.append(l2)
@@ -67,7 +69,7 @@ class HD_metric(metric):
         super().__init__("Hausdorff Distance")
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, label: torch.Tensor
     ):
         hd_1 = hausdorff_loss(pc_adv, pc_ori)
         self.batch_metric.append(hd_1)
@@ -78,7 +80,7 @@ class DoubleHD_metric(metric):
         super().__init__("Double Hausdorff Distance")
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, label: torch.Tensor
     ):
         hd_1 = hausdorff_loss(pc_adv, pc_ori)
         hd_2 = hausdorff_loss(pc_ori, pc_adv)
@@ -90,7 +92,7 @@ class CD_metric(metric):
         super().__init__("Chamfer Distance")
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, label: torch.Tensor
     ):
         cd = chamfer_loss(pc_adv, pc_ori)
         self.batch_metric.append(cd)
@@ -101,7 +103,7 @@ class PseudoCD_metric(metric):
         super().__init__("Pseudo Chamfer Distance")
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, label: torch.Tensor
     ):
         pcd = pseudo_chamfer_loss(pc_adv, pc_ori)
         self.batch_metric.append(pcd)
@@ -113,7 +115,7 @@ class Curvature_metric(metric):
         self.k = k
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, label: torch.Tensor
     ):
         cur = local_curvature_loss(pc_adv, pc_ori, pc_normal, self.k)
         self.batch_metric.append(cur)
@@ -125,7 +127,7 @@ class Smooth_metric(metric):
         self.k = k
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor
+        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, label: torch.Tensor
     ):
         smooth = kNN_smoothing_loss(pc_adv, self.k)
         self.batch_metric.append(smooth)
@@ -139,11 +141,16 @@ class metric_collector:
         self.metrics.append(metric_obj)
 
     def update(
-        self, pc_adv: torch.Tensor, pc_ori: torch.Tensor, pc_normal: torch.Tensor, recall_mask: Optional[torch.Tensor] = None
+        self,
+        pc_adv: torch.Tensor,
+        pc_ori: torch.Tensor,
+        pc_normal: torch.Tensor,
+        label: torch.Tensor,
+        recall_mask: Optional[torch.Tensor] = None,
     ):
         with torch.no_grad():
             for m in self.metrics:
-                m.update(pc_adv, pc_ori, pc_normal)
+                m.update(pc_adv, pc_ori, pc_normal, label)
 
     # def reset(self):
     #     for m in self.metrics:
