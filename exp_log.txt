@@ -1,0 +1,97 @@
+Eidos on pointnet ShapeNet:
+
+Metric Summary:
+ASR: 0.990113 ± 0.098958
+L2 norm: 0.822283 ± 0.930833
+Hausdorff Distance: 0.036555 ± 0.023736
+Double Hausdorff Distance: 0.024907 ± 0.014545
+Chamfer Distance: 0.000589 ± 0.000646
+Pseudo Chamfer Distance: 0.000304 ± 0.000277
+Curvature Loss: 0.004328 ± 0.004207
+kNN Smoothing Loss: 0.001417 ± 0.000902
+
+Recall count: 2832
+Average time cost: 3.0840764072206284
+
+SI_ADV on pointnet ShapeNet:
+
+Metric Summary:
+ASR: 0.990113 ± 0.098958
+L2 norm: 1.015365 ± 0.975103
+Hausdorff Distance: 0.056894 ± 0.016276
+Double Hausdorff Distance: 0.035365 ± 0.012170
+Chamfer Distance: 0.000748 ± 0.000681
+Pseudo Chamfer Distance: 0.000442 ± 0.000286
+Curvature Loss: 0.004965 ± 0.004533
+kNN Smoothing Loss: 0.001351 ± 0.000873
+
+Recall count: 2832
+Average time cost: 2.7722506324450173
+
+geoa3 on pointnet ShapeNet:
+
+
+Metric Summary:
+ASR: 1.000000 ± 0.000000
+L2 norm: 7.788131 ± 5.520922
+Hausdorff Distance: 0.020215 ± 0.012149
+Double Hausdorff Distance: 0.014556 ± 0.008262
+Chamfer Distance: 0.001542 ± 0.000617
+Pseudo Chamfer Distance: 0.000894 ± 0.000335
+Curvature Loss: 0.004537 ± 0.002626
+kNN Smoothing Loss: 0.001596 ± 0.000900
+
+Recall count: 2832
+Average time cost: 574.110882086224
+
+
+Eidos on dgcnn ShapeNet:
+Metric Summary:
+ASR: 0.993312 ± 0.081519
+L2 norm: 2.660347 ± 2.566370
+Hausdorff Distance: 0.017628 ± 0.016853
+Double Hausdorff Distance: 0.014502 ± 0.010823
+Chamfer Distance: 0.001350 ± 0.001166
+Pseudo Chamfer Distance: 0.000705 ± 0.000656
+Curvature Loss: 0.012815 ± 0.010498
+kNN Smoothing Loss: 0.001735 ± 0.000949
+
+Recall count: 2841
+Average time cost: 16.923966119024488
+
+SI_ADV on dgcnn ShapeNet:
+
+ASR: 0.992256 ± 0.087673
+L2 norm: 3.186917 ± 2.638119
+Hausdorff Distance: 0.047338 ± 0.016217
+Double Hausdorff Distance: 0.029811 ± 0.010673
+Chamfer Distance: 0.001862 ± 0.001206
+Pseudo Chamfer Distance: 0.001095 ± 0.000679
+Curvature Loss: 0.017068 ± 0.011328
+kNN Smoothing Loss: 0.001738 ± 0.000943
+
+
+Eidos on curvenet ShapeNet:
+
+Metric Summary:
+ASR: 0.973173 ± 0.161605
+L2 norm: 2.835241 ± 2.996519
+Hausdorff Distance: 0.032871 ± 0.022921
+Double Hausdorff Distance: 0.024555 ± 0.016080
+Chamfer Distance: 0.001501 ± 0.001514
+Pseudo Chamfer Distance: 0.000825 ± 0.000875
+Curvature Loss: 0.012563 ± 0.011722
+kNN Smoothing Loss: 0.001628 ± 0.000938
+
+SI_ADV on curvenet ShapeNet:
+
+Metric Summary:
+ASR: 0.972820 ± 0.162635
+L2 norm: 3.138036 ± 2.946614
+Hausdorff Distance: 0.056689 ± 0.016359
+Double Hausdorff Distance: 0.036598 ± 0.012492
+Chamfer Distance: 0.001790 ± 0.001443
+Pseudo Chamfer Distance: 0.001057 ± 0.000807
+Curvature Loss: 0.014973 ± 0.011558
+kNN Smoothing Loss: 0.001599 ± 0.000921
+

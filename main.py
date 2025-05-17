@@ -25,13 +25,18 @@ from utils.loss_utils import (
     pseudo_chamfer_loss,
 )
 from utils.metric_utils import *
-from utils.modelnet40_utils import ModelNetDataset
+from data_utils import ModelNetDataset, PartNormalDataset
 from utils.common_utils import set_seed
 
 
 def data_preprocess(data: list[torch.Tensor, torch.Tensor]):
     """Preprocess the given data and label."""
-    points, target = data
+    if data.__len__() == 2:
+        points, target = data
+    elif data.__len__() == 3:
+        points, target, _ = data
+    else:
+        raise NotImplementedError
 
     points = points  # [B, N, C]
     target = target.squeeze(1)  # [B]
@@ -67,7 +72,7 @@ def load_partial_modelnet40_dataset(data_path: str):
 
         def __getitem__(self, idx):
             points, label = self.data[idx]
-            # 如果 points 是 numpy，这里动态转为 Tensor（更灵活）
+
             if not isinstance(points, torch.Tensor):
                 points = torch.tensor(points, dtype=torch.float32)
             if not isinstance(label, torch.Tensor):
@@ -80,33 +85,29 @@ def load_partial_modelnet40_dataset(data_path: str):
     return dataset
 
 
+def load_shapenet_part_dataset(data_path: str):
+    TEST_DATASET = PartNormalDataset(
+        root=data_path, npoints=1024, split="test", normal_channel=True
+    )
+
+    return TEST_DATASET
+
+
 def load_modelnet40_dataset(data_path: str):
-    # TRAIN_DATASET = ModelNetDataset(
-    #     root=data_path, npoint=8192, split="train", normal_channel=False
-    # )
-
-    # train_dataLoader = DataLoader(
-    #     TRAIN_DATASET, batch_size=batch_size, shuffle=True, num_workers=64
-    # )
-
-    TEST_DATASET = ModelNetDataset(root=data_path, npoint=8192,
-                                   split="test", normal_channel=True)
-
-    # test_dataLoader = DataLoader(
-    #     TEST_DATASET, batch_size=batch_size, shuffle=False, num_workers=64
-    # )
-
+    TEST_DATASET = ModelNetDataset(
+        root=data_path, npoint=8192, split="test", normal_channel=True
+    )
     return TEST_DATASET
 
 
 @line_profiler.profile
 def main():
-
     num_class = 0
     if args.dataset == "ModelNet40" or args.dataset == "ModelNet40Full":
         num_class = 40
     elif args.dataset == "ShapeNetPart":
         num_class = 16
+
     assert num_class != 0
     args.num_class = num_class
 
@@ -121,13 +122,21 @@ def main():
 
     if args.dataset == "ModelNet40":
         dataset = load_partial_modelnet40_dataset(
-            args.data_path)
+            "./data/modelNet40_batch1_1000batches_test.pkl.clean"
+        )
     elif args.dataset == "ModelNet40Full":
-        dataset = load_modelnet40_dataset(
-            args.data_path)
+        dataset = load_modelnet40_dataset("./data/modelnet40_normal_resampled")
+    elif args.dataset == "ShapeNetPart":
+        dataset = load_shapenet_part_dataset(
+            "./data/shapenetcore_partanno_segmentation_benchmark_v0_normal"
+        )
+    else:
+        raise NotImplementedError
+
+    print(f"Dataset size:{dataset.__len__()}")
 
     collector = metric_collector()
-    collector.register(ASR_metric(attack.classifier))
+    collector.register(ASR_metric(attack.classifier, attack.pre_head))
     collector.register(L2_metric())
     collector.register(HD_metric())
     collector.register(DoubleHD_metric())
@@ -138,20 +147,18 @@ def main():
 
     avg_time_cost = []
 
-    recall = []
+    recall_sample = 0
 
     query_costs = []
 
     if args.time_verify or args.ss_exp:
-        dataset = Subset(dataset, range(100))
+        dataset = Subset(dataset, range(0, dataset.__len__(), 20))
 
     dataloader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False, num_workers=64
     )
 
-    for batch_id, data in tqdm(
-        enumerate(dataloader), total=dataloader.__len__()
-    ):
+    for batch_id, data in tqdm(enumerate(dataloader), total=dataloader.__len__()):
 
         points, target = data_preprocess(data)
         target = target.long()
@@ -162,7 +169,10 @@ def main():
 
         with torch.no_grad():
             recall = target == attack.predict(points)
+        if not recall.any():
+            continue
 
+        recall_sample += recall.int().sum()
         points, target = points[recall], target[recall]
 
         # start attack
@@ -173,27 +183,60 @@ def main():
         t1 = time.time()
         avg_time_cost.append(t1 - t0)
 
-        adv_target = attack.predict(adv_points)
+        adv_target: torch.Tensor = attack.predict(adv_points)
 
-        result.append((adv_points.cpu().numpy(), adv_target.cpu().numpy()))
+        result.append(
+            (
+                points.cpu().numpy(),
+                adv_points.cpu().numpy(),
+                target.cpu().numpy(),
+                adv_target.cpu().numpy(),
+            )
+        )
 
         pc_normal = points[:, :, -3:]
         pc_ori = points[:, :, 0:3]
         pc_adv = adv_points[:, :, :]
-        collector.update(pc_adv, pc_ori, pc_normal)
+        collector.update(pc_adv, pc_ori, pc_normal, target)
+
+    if args.save_to_file:
+        num = 0
+        index_list = ""
+        if isinstance(dataset, Subset):
+            idx_to_classes = dataset.dataset.idx_to_classes
+        else:
+            idx_to_classes = dataset.idx_to_classes
+
+        save_to_path = f"./outputs/{args.task_name}"
+        os.makedirs(save_to_path, exist_ok=True)
+        for batch_pts, batch_adv_pts, batch_target, batch_adv_target in result:
+            B = batch_pts.shape[0]
+            for batch_mask in range(B):
+                ori_name = (
+                    f"{num}_ori_{idx_to_classes[batch_target[batch_mask]]}_no_color.npy"
+                )
+                adv_name = f"{num}_adv_{idx_to_classes[batch_adv_target[batch_mask]]}_no_color.npy"
+                filename = os.path.join(save_to_path, ori_name)
+                np.save(filename, batch_pts[batch_mask][:, [0, 2, 1]])
+                filename = os.path.join(save_to_path, adv_name)
+                np.save(filename, batch_adv_pts[batch_mask][:, [0, 2, 1]])
+                index_list += f"{ori_name}, {adv_name}, {idx_to_classes[batch_target[batch_mask]]}, {idx_to_classes[batch_adv_target[batch_mask]]}\n"
+                num += 1
+
+        filename = os.path.join(save_to_path, "modelnet40_index.txt")
+        with open(filename, "w+") as outputs:
+            outputs.write(index_list)
 
     print(collector.output_str())
     # if not args.query_attack_method is None:
     #     log += f"Average Query Cost:{np.array(query_costs).mean()}±{np.array(query_costs).std()}\n"
     # print(log)
-
+    print(f"Recall count: {recall_sample}")
     print(f"Average time cost: {np.array(avg_time_cost).mean()}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Eidos 3D Adversarial Point Clouds"
-    )
+    parser = argparse.ArgumentParser(description="Eidos 3D Adversarial Point Clouds")
     parser.add_argument(
         "--batch_size",
         type=int,
@@ -218,7 +261,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default="ModelNet40",
-        choices=["ModelNet40", "ModelNet40Full"],
+        choices=["ModelNet40", "ModelNet40Full", "ShapeNetPart"],
     )
     parser.add_argument(
         "--data-path",
@@ -252,8 +295,7 @@ if __name__ == "__main__":
         "--query_attack_method",
         type=str,
         default=None,
-        choices=["ifgm_si_adv_query",
-                 "ifgm_bp_ours_query", "simbapp", "simba"],
+        choices=["ifgm_si_adv_query", "ifgm_bp_ours_query", "simbapp", "simba"],
     )
     parser.add_argument(
         "--surrogate_model",
@@ -294,19 +336,19 @@ if __name__ == "__main__":
         type=str,
         default="bp3",
         choices=[
-            "bp1",
-            "bp1_si",
-            "bp2",
-            "bp2_si",
+            # "bp1",
+            # "bp1_si",
+            # "bp2",
+            # "bp2_si",
             "bp3",
-            "bp3_var",
-            "bp3_no_GS",
-            "bp3_si_no_GS",
-            "bp3_deepfool",
-            "bp3_deepfool_var",
-            "bp3_si",
-            "bp4",
-            "bp4_si",
+            # "bp3_var",
+            # "bp3_no_GS",
+            # "bp3_si_no_GS",
+            # "bp3_deepfool",
+            # "bp3_deepfool_var",
+            # "bp3_si",
+            # "bp4",
+            # "bp4_si",
         ],
     )
     parser.add_argument(
@@ -329,10 +371,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--step_size", default=0.007, type=float, help="step-size of perturbation"
     )
-    parser.add_argument("--device", default=0, type=int,
-                        help="specific device")
-    parser.add_argument("--task_name", default=None,
-                        type=str, help="specific device")
+    parser.add_argument("--device", default=0, type=int, help="specific device")
+    parser.add_argument("--task_name", default=None, type=str, help="specific device")
     # parser.add_argument("--rank", type=int, default=0, help="")
     # parser.add_argument("--rank_count", type=int, default=1000, help="")
 
@@ -343,6 +383,11 @@ if __name__ == "__main__":
         "--exponential_step",
         action="store_true",
         help="Whether to use exponential_step [default: False]",
+    )
+    parser.add_argument(
+        "--save_to_file",
+        action="store_true",
+        help="Whether to save point clouds as .npy [default: False]",
     )
 
     parser.add_argument("--l2_weight", type=float, default=1.0, help="")
@@ -368,86 +413,86 @@ if __name__ == "__main__":
     )
 
     # Arguments for geoa3
-    parser.add_argument(
-        "--attack_label",
-        default="Untarget",
-        type=str,
-        help="For GEOA3 [All; ...; Untarget]",
-    )
-    parser.add_argument(
-        "--curv_loss_weight", type=float, default=1.0, help="For GEOA3 "
-    )
-    parser.add_argument(
-        "--iter_max_steps",
-        default=500,
-        type=int,
-        metavar="M",
-        help="For GEOA3 max steps",
-    )
-    parser.add_argument("--optim", default="adam",
-                        type=str, help="For GEOA3 adam| sgd")
-    parser.add_argument("--lr", type=float, default=0.010, help="For GEOA3 ")
-    parser.add_argument(
-        "--cls_loss_type", default="CE", type=str, help="For GEOA3 Margin | CE"
-    )
-    parser.add_argument(
-        "--dis_loss_type", default="CD", type=str, help="For GEOA3 CD | L2 | None"
-    )
-    parser.add_argument("--dis_loss_weight", type=float,
-                        default=1.0, help="For GEOA3 ")
-    parser.add_argument("--hd_loss_weight", type=float,
-                        default=0.1, help="For GEOA3 ")
-    parser.add_argument(
-        "--is_use_lr_scheduler",
-        dest="is_use_lr_scheduler",
-        action="store_true",
-        default=False,
-        help="",
-    )
-    parser.add_argument(
-        "--cc_linf",
-        type=float,
-        default=0.0,
-        help="For GEOA3 Coefficient for infinity norm",
-    )
+    # parser.add_argument(
+    #     "--attack_label",
+    #     default="Untarget",
+    #     type=str,
+    #     help="For GEOA3 [All; ...; Untarget]",
+    # )
+    # parser.add_argument(
+    #     "--curv_loss_weight", type=float, default=1.0, help="For GEOA3 "
+    # )
+    # parser.add_argument(
+    #     "--iter_max_steps",
+    #     default=500,
+    #     type=int,
+    #     metavar="M",
+    #     help="For GEOA3 max steps",
+    # )
+    # parser.add_argument("--optim", default="adam",
+    #                     type=str, help="For GEOA3 adam| sgd")
+    # parser.add_argument("--lr", type=float, default=0.010, help="For GEOA3 ")
+    # parser.add_argument(
+    #     "--cls_loss_type", default="CE", type=str, help="For GEOA3 Margin | CE"
+    # )
+    # parser.add_argument(
+    #     "--dis_loss_type", default="CD", type=str, help="For GEOA3 CD | L2 | None"
+    # )
+    # parser.add_argument("--dis_loss_weight", type=float,
+    #                     default=1.0, help="For GEOA3 ")
+    # parser.add_argument("--hd_loss_weight", type=float,
+    #                     default=0.1, help="For GEOA3 ")
+    # parser.add_argument(
+    #     "--is_use_lr_scheduler",
+    #     dest="is_use_lr_scheduler",
+    #     action="store_true",
+    #     default=False,
+    #     help="",
+    # )
+    # parser.add_argument(
+    #     "--cc_linf",
+    #     type=float,
+    #     default=0.0,
+    #     help="For GEOA3 Coefficient for infinity norm",
+    # )
 
-    # Arguments for GSDA
-    parser.add_argument(
-        "--band_frequency",
-        type=int,
-        nargs="+",
-        default=[0, 1024],
-        help="For GSDA band frequency",
-    )
-    parser.add_argument(
-        "--spectral_attack",
-        action="store_true",
-        default=True,
-        help="For GSDA use spectral attack",
-    )
-    parser.add_argument("--KNN", type=int, default=10, help="K of K-NN graph")
-    parser.add_argument(
-        "--spectral_offset",
-        action="store_true",
-        default=True,
-        help="use spectral offset attack",
-    )
-    parser.add_argument(
-        "--spectral_restrict", type=float, default=0.0, help="spectral restrict"
-    )
-    parser.add_argument("--npoint", default=1024, type=int, help="")
-    parser.add_argument(
-        "--is_partial_var",
-        dest="is_partial_var",
-        action="store_true",
-        default=False,
-        help="",
-    )
-    parser.add_argument(
-        "--is_cd_single_side", action="store_true", default=False, help=""
-    )
-    parser.add_argument("--uniform_loss_weight",
-                        type=float, default=0.0, help="")
+    # # Arguments for GSDA
+    # parser.add_argument(
+    #     "--band_frequency",
+    #     type=int,
+    #     nargs="+",
+    #     default=[0, 1024],
+    #     help="For GSDA band frequency",
+    # )
+    # parser.add_argument(
+    #     "--spectral_attack",
+    #     action="store_true",
+    #     default=True,
+    #     help="For GSDA use spectral attack",
+    # )
+    # parser.add_argument("--KNN", type=int, default=10, help="K of K-NN graph")
+    # parser.add_argument(
+    #     "--spectral_offset",
+    #     action="store_true",
+    #     default=True,
+    #     help="use spectral offset attack",
+    # )
+    # parser.add_argument(
+    #     "--spectral_restrict", type=float, default=0.0, help="spectral restrict"
+    # )
+    # parser.add_argument("--npoint", default=1024, type=int, help="")
+    # parser.add_argument(
+    #     "--is_partial_var",
+    #     dest="is_partial_var",
+    #     action="store_true",
+    #     default=False,
+    #     help="",
+    # )
+    # parser.add_argument(
+    #     "--is_cd_single_side", action="store_true", default=False, help=""
+    # )
+    # parser.add_argument("--uniform_loss_weight",
+    #                     type=float, default=0.0, help="")
 
     args = parser.parse_args()
 

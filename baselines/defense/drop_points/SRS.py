@@ -27,11 +27,21 @@ class SRSDefense(nn.Module):
             pc (torch.FloatTensor): batch input pc, [B, K, 3]
         """
         B, K = pc.shape[:2]
-        idx = [np.random.choice(K, K - self.drop_num, replace=False) for _ in range(B)]
-        pc = torch.stack([pc[i][torch.from_numpy(idx[i]).long().to(pc.device)] for i in range(B)])
+        if self.drop_num == 0:
+            return pc
+        assert self.drop_num < K, "drop_num must be less than the number of points K"
+        
+        idx = torch.stack([torch.randperm(K, device=pc.device)[:K - self.drop_num] for _ in range(B)])
+        
+        # Gather points using expanded indices [B, K - drop_num, 3]
+        idx_expanded = idx.unsqueeze(-1).expand(-1, -1, 3)
+        pc = torch.gather(pc, 1, idx_expanded)
+        # B, K = pc.shape[:2]
+        # idx = [np.random.choice(K, K - self.drop_num, replace=False) for _ in range(B)]
+        # pc = torch.stack([pc[i][torch.from_numpy(idx[i]).long().to(pc.device)] for i in range(B)])
         return pc
 
-    def forward(self, x):
+    def forward(self, x:torch.Tensor):
         # with torch.no_grad():
         x = x.transpose(1, 2)
         x = self.random_drop(x)

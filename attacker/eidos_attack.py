@@ -205,8 +205,6 @@ class eidos_attack(nn.Module):
 
                 logits = logits.argmax(-1)
                 stage2 = (logits != target).all()
-                if stage2:
-                    print(i)
 
             else:
                 points = points.detach()
@@ -275,11 +273,11 @@ class eidos_attack(nn.Module):
                 # normal_vec = get_normal_vector(points)
 
         with torch.no_grad():
-            # if not bp.output_points is None:
-            #     adv_points = bp.output_points.clone()
-            # else:
-            #     adv_points = points.clone()
-            adv_points = self.boundary_projection.output_points.clone()
+            if self.boundary_projection.output_points is not None:
+                adv_points = self.boundary_projection.output_points.clone()
+            else:
+                adv_points = points.clone()
+            
             adv_logits = self.classifier(
                 self.pre_head(adv_points.transpose(1, 2)))
             adv_target = adv_logits.argmax(-1)
