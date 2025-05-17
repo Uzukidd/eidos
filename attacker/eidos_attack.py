@@ -205,8 +205,6 @@ class eidos_attack(nn.Module):
 
                 logits = logits.argmax(-1)
                 stage2 = (logits != target).all()
-                if stage2:
-                    print(i)
 
             else:
                 points = points.detach()

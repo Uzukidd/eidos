@@ -25,13 +25,18 @@ from utils.loss_utils import (
     pseudo_chamfer_loss,
 )
 from utils.metric_utils import *
-from utils.modelnet40_utils import ModelNetDataset
+from data_utils import ModelNetDataset, PartNormalDataset
 from utils.common_utils import set_seed
 
 
 def data_preprocess(data: list[torch.Tensor, torch.Tensor]):
     """Preprocess the given data and label."""
-    points, target = data
+    if data.__len__() == 2:
+        points, target = data
+    elif data.__len__() == 3:
+        points, target, _ = data
+    else:
+        raise NotImplementedError
 
     points = points  # [B, N, C]
     target = target.squeeze(1)  # [B]
@@ -80,22 +85,18 @@ def load_partial_modelnet40_dataset(data_path: str):
     return dataset
 
 
+def load_shapenet_part_dataset(data_path: str):
+    TEST_DATASET = PartNormalDataset(
+        root=data_path, npoints=1024, split="test", normal_channel=True
+    )
+
+    return TEST_DATASET
+
+
 def load_modelnet40_dataset(data_path: str):
-    # TRAIN_DATASET = ModelNetDataset(
-    #     root=data_path, npoint=8192, split="train", normal_channel=False
-    # )
-
-    # train_dataLoader = DataLoader(
-    #     TRAIN_DATASET, batch_size=batch_size, shuffle=True, num_workers=64
-    # )
-
-    TEST_DATASET = ModelNetDataset(root=data_path, npoint=8192,
-                                   split="test", normal_channel=True)
-
-    # test_dataLoader = DataLoader(
-    #     TEST_DATASET, batch_size=batch_size, shuffle=False, num_workers=64
-    # )
-
+    TEST_DATASET = ModelNetDataset(
+        root=data_path, npoint=8192, split="test", normal_channel=True
+    )
     return TEST_DATASET
 
 
@@ -106,6 +107,7 @@ def main():
         num_class = 40
     elif args.dataset == "ShapeNetPart":
         num_class = 16
+
     assert num_class != 0
     args.num_class = num_class
 
@@ -120,10 +122,18 @@ def main():
 
     if args.dataset == "ModelNet40":
         dataset = load_partial_modelnet40_dataset(
-            args.data_path)
+            "./data/modelNet40_batch1_1000batches_test.pkl.clean"
+        )
     elif args.dataset == "ModelNet40Full":
-        dataset = load_modelnet40_dataset(
-            args.data_path)
+        dataset = load_modelnet40_dataset("./data/modelnet40_normal_resampled")
+    elif args.dataset == "ShapeNetPart":
+        dataset = load_shapenet_part_dataset(
+            "./data/shapenetcore_partanno_segmentation_benchmark_v0_normal"
+        )
+    else:
+        raise NotImplementedError
+
+    print(f"Dataset size:{dataset.__len__()}")
 
     collector = metric_collector()
     collector.register(ASR_metric(attack.classifier, attack.pre_head))
@@ -137,7 +147,7 @@ def main():
 
     avg_time_cost = []
 
-    recall = []
+    recall_sample = 0
 
     query_costs = []
 
@@ -148,9 +158,7 @@ def main():
         dataset, batch_size=args.batch_size, shuffle=False, num_workers=64
     )
 
-    for batch_id, data in tqdm(
-        enumerate(dataloader), total=dataloader.__len__()
-    ):
+    for batch_id, data in tqdm(enumerate(dataloader), total=dataloader.__len__()):
 
         points, target = data_preprocess(data)
         target = target.long()
@@ -164,6 +172,7 @@ def main():
         if not recall.any():
             continue
 
+        recall_sample += recall.int().sum()
         points, target = points[recall], target[recall]
 
         # start attack
@@ -176,8 +185,14 @@ def main():
 
         adv_target: torch.Tensor = attack.predict(adv_points)
 
-        result.append((points.cpu().numpy(), adv_points.cpu().numpy(),
-                      target.cpu().numpy(), adv_target.cpu().numpy()))
+        result.append(
+            (
+                points.cpu().numpy(),
+                adv_points.cpu().numpy(),
+                target.cpu().numpy(),
+                adv_target.cpu().numpy(),
+            )
+        )
 
         pc_normal = points[:, :, -3:]
         pc_ori = points[:, :, 0:3]
@@ -197,19 +212,18 @@ def main():
         for batch_pts, batch_adv_pts, batch_target, batch_adv_target in result:
             B = batch_pts.shape[0]
             for batch_mask in range(B):
-                ori_name = f"{num}_ori_{idx_to_classes[batch_target[batch_mask]]}_no_color.npy"
+                ori_name = (
+                    f"{num}_ori_{idx_to_classes[batch_target[batch_mask]]}_no_color.npy"
+                )
                 adv_name = f"{num}_adv_{idx_to_classes[batch_adv_target[batch_mask]]}_no_color.npy"
-                filename = os.path.join(
-                    save_to_path, ori_name)
+                filename = os.path.join(save_to_path, ori_name)
                 np.save(filename, batch_pts[batch_mask][:, [0, 2, 1]])
-                filename = os.path.join(
-                    save_to_path, adv_name)
+                filename = os.path.join(save_to_path, adv_name)
                 np.save(filename, batch_adv_pts[batch_mask][:, [0, 2, 1]])
                 index_list += f"{ori_name}, {adv_name}, {idx_to_classes[batch_target[batch_mask]]}, {idx_to_classes[batch_adv_target[batch_mask]]}\n"
                 num += 1
 
-        filename = os.path.join(
-            save_to_path, "modelnet40_index.txt")
+        filename = os.path.join(save_to_path, "modelnet40_index.txt")
         with open(filename, "w+") as outputs:
             outputs.write(index_list)
 
@@ -217,14 +231,12 @@ def main():
     # if not args.query_attack_method is None:
     #     log += f"Average Query Cost:{np.array(query_costs).mean()}±{np.array(query_costs).std()}\n"
     # print(log)
-
+    print(f"Recall count: {recall_sample}")
     print(f"Average time cost: {np.array(avg_time_cost).mean()}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Eidos 3D Adversarial Point Clouds"
-    )
+    parser = argparse.ArgumentParser(description="Eidos 3D Adversarial Point Clouds")
     parser.add_argument(
         "--batch_size",
         type=int,
@@ -249,7 +261,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default="ModelNet40",
-        choices=["ModelNet40", "ModelNet40Full"],
+        choices=["ModelNet40", "ModelNet40Full", "ShapeNetPart"],
     )
     parser.add_argument(
         "--data-path",
@@ -283,8 +295,7 @@ if __name__ == "__main__":
         "--query_attack_method",
         type=str,
         default=None,
-        choices=["ifgm_si_adv_query",
-                 "ifgm_bp_ours_query", "simbapp", "simba"],
+        choices=["ifgm_si_adv_query", "ifgm_bp_ours_query", "simbapp", "simba"],
     )
     parser.add_argument(
         "--surrogate_model",
@@ -360,10 +371,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--step_size", default=0.007, type=float, help="step-size of perturbation"
     )
-    parser.add_argument("--device", default=0, type=int,
-                        help="specific device")
-    parser.add_argument("--task_name", default=None,
-                        type=str, help="specific device")
+    parser.add_argument("--device", default=0, type=int, help="specific device")
+    parser.add_argument("--task_name", default=None, type=str, help="specific device")
     # parser.add_argument("--rank", type=int, default=0, help="")
     # parser.add_argument("--rank_count", type=int, default=1000, help="")
 
